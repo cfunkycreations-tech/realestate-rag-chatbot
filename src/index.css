@@ -1,0 +1,104 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg-deep: #0d0c0b;
+  --bg-surface: #131210;
+  --bg-card: #1a1815;
+  --border: rgba(255,255,255,0.07);
+  --amber: #f59e0b;
+  --amber-soft: #fbbf24;
+  --text-primary: #f5f0eb;
+  --text-muted: #6b6560;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  background: var(--bg-deep);
+  color: var(--text-primary);
+  margin: 0;
+  -webkit-font-smoothing: antialiased;
+}
+
+.app-shell {
+  background:
+    radial-gradient(ellipse 60% 40% at 20% 10%, rgba(245,158,11,0.04) 0%, transparent 60%),
+    radial-gradient(ellipse 40% 60% at 80% 80%, rgba(120,100,60,0.06) 0%, transparent 60%),
+    var(--bg-deep);
+}
+
+.header-bar {
+  background: rgba(13,12,11,0.85);
+  backdrop-filter: blur(20px);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+.logo-icon {
+  background: linear-gradient(135deg, #92400e, #d97706);
+  box-shadow: 0 0 20px rgba(245,158,11,0.25);
+}
+
+.ai-avatar {
+  background: linear-gradient(135deg, #1c1a16, #2d2820);
+  border: 1px solid rgba(245,158,11,0.2);
+}
+
+.ai-bubble {
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.07);
+}
+
+.user-bubble {
+  background: linear-gradient(135deg, #92400e, #b45309);
+  box-shadow: 0 4px 20px rgba(180,83,9,0.2);
+}
+
+.input-area {
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+}
+
+.input-wrapper {
+  background: rgba(255,255,255,0.03);
+}
+
+.input-wrapper:focus-within {
+  border-color: rgba(245,158,11,0.3) !important;
+  background: rgba(255,255,255,0.05);
+}
+
+.send-btn {
+  background: linear-gradient(135deg, #92400e, #d97706);
+  box-shadow: 0 2px 12px rgba(245,158,11,0.2);
+}
+
+.suggested-pill {
+  background: rgba(255,255,255,0.04);
+  border-color: rgba(255,255,255,0.1);
+  color: #a8a09a;
+}
+
+.suggested-pill:hover {
+  background: rgba(245,158,11,0.08);
+  border-color: rgba(245,158,11,0.25);
+  color: #f59e0b;
+}
+
+.sidebar {
+  background: rgba(255,255,255,0.01);
+}
+
+.property-card:hover {
+  border-color: rgba(245,158,11,0.2) !important;
+}
+
+textarea::placeholder { color: var(--text-muted); }
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 2px; }
