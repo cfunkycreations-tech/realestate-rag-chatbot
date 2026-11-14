@@ -18,3 +18,4 @@
 @media(prefers-reduced-motion:reduce){.bot-card-art img{animation:none}.bot-card{transition:none}}
 .gallery-row .bot-card{min-height:0}.bot-card-art{min-height:0}.bot-card-art img{min-height:0}.office-paging{display:flex;align-items:center;gap:8px;color:#c7bad1;font-size:11px}.office-paging button{padding:6px 8px}
 .bot-card.selected{border-color:#f3cc71;box-shadow:0 0 12px #f3b95366,0 0 15px #b636dd66}.quick-mission label{max-width:210px;overflow:hidden;text-overflow:ellipsis}
+.gallery-row.cluster{grid-template-rows:18px minmax(0,1fr);row-gap:6px}.cluster-heading{grid-column:1/-1;font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:#e6c37c;font-weight:750}
