@@ -98,3 +98,29 @@ def test_overlapping_known_secrets_do_not_split_after_cut_moves():
     output = redactor.feed('x' * 30 + 'ABCDEF123456789' + 'y' * 7)
     output += redactor.feed('z' * 30) + redactor.finish()
     assert output == 'x' * 30 + '[redacted]' + 'y' * 7 + 'z' * 30
+
+
+def test_seeded_stream_chunkings_match_full_text_redaction():
+    import random
+    import string
+    from funkbot.redaction import redact_text
+
+    randomizer = random.Random(1542)
+    for _ in range(500):
+        secrets = [''.join(randomizer.choice('abc123') for _ in range(randomizer.randint(2,20))) for _ in range(randomizer.randrange(0,4))]
+        parts = [''.join(randomizer.choice('abcdef 123-') for _ in range(randomizer.randrange(0,25))) for _ in range(6)]
+        candidates = secrets + [
+            'sk-' + ''.join(randomizer.choice(string.ascii_letters + string.digits) for _ in range(20)),
+            'Bearer ' + ''.join(randomizer.choice(string.ascii_letters) for _ in range(20)),
+        ]
+        for _ in range(randomizer.randrange(1,4)):
+            parts.insert(randomizer.randrange(len(parts)+1),randomizer.choice(candidates))
+        text = ' '.join(parts)
+        redactor = SlidingRedactor(secrets)
+        output = ''
+        index = 0
+        while index < len(text):
+            width = randomizer.randint(1,30)
+            output += redactor.feed(text[index:index+width])
+            index += width
+        assert output + redactor.finish() == redact_text(text, secrets)
