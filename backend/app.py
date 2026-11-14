@@ -387,7 +387,8 @@ async def run_chat(job, bot, history, profile):
                         finish_run(job, 'done', 'done')
                     return
         except asyncio.CancelledError:
-            finish_run(job,'cancelled','error',{'message':'Response stopped.'}); return
+            user_stopped = job.get('user_cancelled', False)
+            finish_run(job, 'cancelled' if user_stopped else 'failed', 'error', {'message':'Response stopped.' if user_stopped else 'The backend stopped before this response finished. Please try again.'}); return
         except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
             # Only fail over on transient gateway errors or invalid/empty responses.
             status = exc.response.status_code if isinstance(exc,httpx.HTTPStatusError) else None
@@ -416,7 +417,8 @@ async def chat(bot_id: str, body: ChatIn, request: Request):
     job['task']=asyncio.create_task(run_chat(job,bot,history,body.profile or bot['profile']))
     def finish_unexpected(task):
         if not job['done']:
-            finish_run(job, 'cancelled' if task.cancelled() else 'failed', 'error', {'message':'Response stopped.' if task.cancelled() else 'The response failed unexpectedly. Please try again.'})
+            user_stopped = task.cancelled() and job.get('user_cancelled', False)
+            finish_run(job, 'cancelled' if user_stopped else 'failed', 'error', {'message':'Response stopped.' if user_stopped else 'The response ended unexpectedly. Please try again.'})
         # Retrieve the exception to avoid leaking arbitrary provider data in logs.
         if not task.cancelled(): task.exception()
     job['task'].add_done_callback(finish_unexpected)
@@ -475,6 +477,7 @@ async def stop_job(job_id: str, request: Request):
         row=c.execute('SELECT status FROM runs WHERE id=?', (job_id,)).fetchone()
     if not row: raise HTTPException(404,'Run not found.')
     if row['status'] in ACTIVE_STATUSES and job and not job['done']:
+        job['user_cancelled'] = True
         job['task'].cancel()
     return {'ok':True}
 

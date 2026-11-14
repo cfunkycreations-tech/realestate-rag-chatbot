@@ -124,3 +124,36 @@ def test_seeded_stream_chunkings_match_full_text_redaction():
             output += redactor.feed(text[index:index+width])
             index += width
         assert output + redactor.finish() == redact_text(text, secrets)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('user_stopped', [True, False])
+async def test_cancellation_reason_distinguishes_user_stop_from_shutdown(monkeypatch, user_stopped):
+    from test_app import create_test_bot
+    bot = create_test_bot()
+    service.set_config('profiles', json.dumps({'smart':[{'gateway':'omniroute','model':'model'}]}))
+    waiting = asyncio.Event()
+
+    class Stream:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        def raise_for_status(self): pass
+        async def aiter_lines(self):
+            waiting.set()
+            await asyncio.Event().wait()
+            yield ''
+
+    class Client:
+        def __init__(self, *args, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        def stream(self, *args, **kwargs): return Stream()
+
+    monkeypatch.setattr(service.httpx, 'AsyncClient', Client)
+    job = {'events':[], 'done':False, 'user_cancelled':user_stopped}
+    task = asyncio.create_task(service.run_chat(job, bot, [], 'smart'))
+    await asyncio.wait_for(waiting.wait(), 2)
+    task.cancel()
+    await task
+    assert job['done'] and job['events'][-1]['type'] == 'error'
+    assert ('Response stopped.' if user_stopped else 'backend stopped') in job['events'][-1]['message']
