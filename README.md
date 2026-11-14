@@ -44,6 +44,8 @@ npm run build
 
 Open **Settings → Character Vault**, then import a ZIP of PNGs from Sprite Grid Slicer. The importer reads `CharacterName`, `CharacterRole`, `Tags` and `Notes` (and `funk:` equivalents); `CharacterName` or `funk:name` is required. ZIPs are limited to 20 MB, 500 files and 64 MB uncompressed; individual PNGs are limited to 8 MB and 16 megapixels. Invalid files and duplicate names or files are skipped with counts. Names and artwork are not sent to the interface until a character is assigned to a Bot. A new Bot gets a weighted random character without replacement until the draw pool is exhausted; existing Bots and an empty Vault use the built-in shapes. Deleting a Bot returns its character to the available pool if no other Bot has it.
 
+New Bots pick a job preset or custom job, with editable instructions; their name comes from the drawn Vault character, or from the fallback name if the Vault is empty. Existing names and job titles stay unchanged. For an existing Bot without a sprite, open its spotlight and choose **Give me a sprite**; explicitly choose whether to keep the name or adopt the character name. The job title is included in the system prompt. The Vault role is an archetype shown in the spotlight, not a job title.
+
 Character images are stored in the same private data volume as the database; back up the whole volume. Image routes require login and a Bot assignment. Files on your own machine cannot be hidden from an administrator with filesystem access. There is no CLI, reroll, per-character animation map or bulk editing in this slice. Imported notes are shown on reveal but are not automatically injected into prompts.
 
 ## Team Command Center and Office
@@ -67,7 +69,20 @@ $env:E2E_PASSWORD = "your-disposable-test-password"
 npm run test:e2e
 ```
 
+### Identity browser check
+
+The identity screenshots are from a disposable test installation with synthetic sprites. This test creates Bots and imports a ZIP; never run it against your real data. Start a fresh separate test installation, obtain its one-time setup code from the backend logs, then in PowerShell:
+
+```powershell
+Set-Location frontend
+$env:E2E_URL = "http://localhost:3000"
+$env:E2E_SETUP_TOKEN = "your-disposable-setup-code"
+npm run test:identity
+```
+
 ## Current behavior and limitations
+
+**No spending caps are implemented yet.** Funk Bot cannot prevent a runaway run from consuming gateway credits. Set limits with your provider and do not leave the app unattended.
 
 - Each Bot has its own stored timeline and identity. The last 40 messages are sent as context; this is conversation history, not semantic memory. Deleting a Bot deletes its messages.
 - The database uses SQLAlchemy connections with Alembic migrations, adopting existing slice databases without replacing their rows. SQL queries and migrations remain SQLite-specific; PostgreSQL support is not implemented. Back up the full data volume before upgrading.
