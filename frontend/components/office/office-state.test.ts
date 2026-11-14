@@ -15,6 +15,7 @@ describe('office pathfinding',()=>{
     expect(route.every(p=>!blocks.has(`${p.x},${p.y}`))).toBe(true);
     expect(pathfind(desk(0),seat(0),blocks)).toEqual(route);
   });
+  it('keeps 50 desks on the floor with enough vertical label space',()=>{expect(desk(10).y-desk(0).y).toBe(4);expect(desk(49).y).toBeLessThan(24)});
   it('stays put when the target is blocked',()=>{
     const start={x:0,y:0};expect(pathfind(start,{x:1,y:0},new Set(['1,0']))).toEqual([start]);
   });

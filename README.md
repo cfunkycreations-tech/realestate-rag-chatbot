@@ -80,6 +80,19 @@ $env:E2E_SETUP_TOKEN = "your-disposable-setup-code"
 npm run test:identity
 ```
 
+### Visual-pass browser check
+
+The `visual-*` screenshots show Gallery, Roster, and Office at desktop and phone widths, plus the phone sidebar. They use a **fresh disposable installation**, 12 Bots assigned synthetic Vault sprites from the two-image identity fixture, and one fallback Bot. The visual check makes no model calls, but it creates Bots and imports artwork: **never run it against your real installation**. Start a separate fresh test installation and use its one-time setup code:
+
+```powershell
+Set-Location frontend
+npm ci
+npx playwright install chromium
+$env:E2E_URL = "http://localhost:3000"
+$env:E2E_SETUP_TOKEN = "your-disposable-setup-code"
+npm run test:visual
+```
+
 ## Current behavior and limitations
 
 **No spending caps are implemented yet.** Funk Bot cannot prevent a runaway run from consuming gateway credits. Set limits with your provider and do not leave the app unattended.

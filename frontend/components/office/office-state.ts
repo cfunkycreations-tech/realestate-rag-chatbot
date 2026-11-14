@@ -6,7 +6,7 @@ export type Motion = {path:Point[]; at:number};
 export type OfficeCharacter = {bot:OfficeBot; state:string; motion:Motion; bubble:string; bubbleAt:number};
 export const WIDTH=40, HEIGHT=24, STEP_MS=180;
 const key=(p:Point)=>`${p.x},${p.y}`;
-export const desk=(index:number):Point=>({x:2+(index%10)*3,y:5+Math.floor(index/10)*3});
+export const desk=(index:number):Point=>({x:2+(index%10)*3,y:5+Math.floor(index/10)*4});
 export const seat=(index:number):Point=>({x:33+(index%5),y:5+(Math.floor(index/5)%5)});
 export function obstacles(count:number):Set<string>{
   const blocks=new Set<string>();
