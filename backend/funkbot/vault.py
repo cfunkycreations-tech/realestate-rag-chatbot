@@ -11,6 +11,7 @@ import zipfile
 from pathlib import Path, PurePosixPath
 
 from PIL import Image, UnidentifiedImageError
+from funkbot.redaction import redact_text
 
 MAX_ARCHIVE = 20 * 1024 * 1024
 MAX_UNPACKED = 64 * 1024 * 1024
@@ -58,7 +59,7 @@ def inspect_png(data):
         raise VaultError('Invalid PNG') from exc
 
 
-def import_zip(data, connection, directory: Path):
+def import_zip(data, connection, directory: Path, redaction_keys: list[str] | None = None):
     if len(data) > MAX_ARCHIVE:
         raise VaultError('ZIP is too large (maximum 20 MB).')
     try:
@@ -88,6 +89,10 @@ def import_zip(data, connection, directory: Path):
                     if len(raw) != entry.file_size or len(raw) > MAX_IMAGE:
                         raise VaultError('Invalid file size')
                     item = inspect_png(raw)
+                    keys = redaction_keys or []
+                    for field in ('name', 'role', 'notes'):
+                        item[field] = redact_text(item[field], keys)
+                    item['tags'] = [redact_text(tag, keys) for tag in item['tags']]
                 except (VaultError, OSError, RuntimeError, zipfile.BadZipFile, ValueError):
                     invalid += 1
                     continue

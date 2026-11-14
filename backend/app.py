@@ -177,6 +177,13 @@ class BotIn(BaseModel):
     shape: str = Field(default='round', pattern='^(round|square|cloud)$')
     profile: str = Field(default='smart', pattern='^(fast|smart|thinker|vision|cheap-bulk)$')
 
+def redact_character(character, keys):
+    # Gateway keys saved after an import must not leak through old metadata.
+    for field in ('name', 'role', 'notes'):
+        character[field] = redact_text(character[field], keys)
+    character['tags'] = [redact_text(tag, keys) for tag in character['tags']]
+    return character
+
 @app.get('/api/bots')
 def bots(request: Request):
     require_auth(request)
@@ -187,12 +194,14 @@ def bots(request: Request):
                             FROM bots b LEFT JOIN bot_characters bc ON bc.bot_id=b.id
                             LEFT JOIN characters ch ON ch.id=bc.character_id ORDER BY b.created_at""").fetchall()
     result=[]
+    keys=configured_secrets()
     for row in rows:
         item=dict(row)
         character = None
         if item['character_name'] is not None:
             character=character_for_bot({'name':item['character_name'], 'role':item['character_role'], 'tags':item['character_tags'],
                                          'notes':item['character_notes'], 'rarity':item['character_rarity']}, item['id'])
+            character = redact_character(character, keys)
         for field in ('character_name','character_role','character_tags','character_notes','character_rarity'):
             item.pop(field)
         item['character']=character
@@ -209,7 +218,7 @@ def create_bot(body: BotIn, request: Request):
         id = str(uuid.uuid4())
         c.execute('INSERT INTO bots VALUES (?,?,?,?,?,?,?,?)',(id,name,title,personality,body.color,body.shape,body.profile,time.time()))
         character=draw_character(c,id)
-    return {'id':id,'character':character}
+    return {'id':id,'character':redact_character(character, configured_secrets()) if character else None}
 
 @app.put('/api/bots/{bot_id}')
 def update_bot(bot_id: str, body: BotIn, request: Request):
@@ -254,9 +263,10 @@ async def vault_import(request: Request, file: UploadFile = File(...)):
     try:
         data=await file.read(MAX_ARCHIVE+1)
         if len(data)>MAX_ARCHIVE: raise VaultError('ZIP is too large (maximum 20 MB).')
+        keys=configured_secrets()
         with db() as c:
             c.execute('BEGIN IMMEDIATE')
-            result=import_zip(data,c,DATA / 'vault')
+            result=import_zip(data,c,DATA / 'vault',keys)
         return result
     except VaultError as exc:
         raise HTTPException(400,str(exc)) from exc

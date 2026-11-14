@@ -48,7 +48,7 @@ Character images are stored in the same private data volume as the database; bac
 
 ## Office
 
-Choose **Office** in the sidebar to see Bots at desks and activity from the authenticated event feed. The canvas is a visualization only: it makes no model calls. **Try demo** plays an explicitly labeled scripted meeting and shows pathfinding to and from the meeting room. Live group chats and real meeting events are not implemented yet, so the live view does not invent them. The live feed begins with events recorded after the event-log upgrade. Use the Bot buttons below the canvas for a keyboard-accessible way to open a chat.
+Choose **Office** in the sidebar to see Bots at desks and activity from the authenticated event feed. The canvas is a visualization only: it makes no model calls. **Try demo** plays an explicitly labeled scripted meeting and shows pathfinding to and from the meeting room. Live group chats and real meeting events are not implemented yet, so the live view does not invent them. The live feed begins with events recorded after the event-log upgrade. On a phone, swipe the canvas horizontally to explore; use the Bot buttons below it for a keyboard-accessible way to open a chat.
 
 ## Current behavior and limitations
 

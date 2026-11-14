@@ -97,3 +97,31 @@ def test_weighted_draw_uses_rarity_weights(monkeypatch):
             counts[result['rarity']]+=1
             c.execute('DELETE FROM bot_characters WHERE bot_id=?',('b',))
     assert 1850 < counts['common'] < 1990
+
+
+def test_vault_metadata_never_returns_saved_gateway_key():
+    secret='opaque-key-to-keep-private'
+    zip_data=archive([('asset.png',png(secret,role='Role '+secret))])
+    with TestClient(service.app) as client:
+        setup(client)
+        client.put('/api/settings/gateways/openrouter',json={'url':'https://openrouter.ai/api/v1','key':secret})
+        result=client.post('/api/vault/import',files={'file':('assets.zip',zip_data,'application/zip')})
+        assert result.json()['added']==1
+        response=client.post('/api/bots',json={'name':'One'})
+        assert secret not in response.text
+        assert secret not in client.get('/api/bots').text
+        with service.db() as c:
+            row=c.execute('SELECT name,role FROM characters').fetchone()
+            assert secret not in row['name'] and secret not in row['role']
+
+
+def test_existing_vault_metadata_is_redacted_when_key_saved_later():
+    secret='later-added-secret-value'
+    zip_data=archive([('asset.png',png(secret))])
+    with TestClient(service.app) as client:
+        setup(client)
+        assert client.post('/api/vault/import',files={'file':('assets.zip',zip_data,'application/zip')}).json()['added']==1
+        bot=client.post('/api/bots',json={'name':'One'}).json()
+        assert bot['character']['name']==secret
+        client.put('/api/settings/gateways/openrouter',json={'url':'https://openrouter.ai/api/v1','key':secret})
+        assert secret not in client.get('/api/bots').text
