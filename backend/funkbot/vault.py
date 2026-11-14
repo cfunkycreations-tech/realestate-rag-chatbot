@@ -59,7 +59,7 @@ def inspect_png(data):
         raise VaultError('Invalid PNG') from exc
 
 
-def import_zip(data, connection, directory: Path, redaction_keys: list[str] | None = None):
+def import_zip(data, connection, directory: Path, redaction_keys: list[str] | None = None, collection: str = ""):
     if len(data) > MAX_ARCHIVE:
         raise VaultError('ZIP is too large (maximum 20 MB).')
     try:
@@ -93,6 +93,8 @@ def import_zip(data, connection, directory: Path, redaction_keys: list[str] | No
                     for field in ('name', 'role', 'notes'):
                         item[field] = redact_text(item[field], keys)
                     item['tags'] = [redact_text(tag, keys) for tag in item['tags']]
+                    if collection and collection.casefold() not in {t.casefold() for t in item['tags']}:
+                        item['tags'].append(redact_text(collection, keys))
                 except (VaultError, OSError, RuntimeError, zipfile.BadZipFile, ValueError):
                     invalid += 1
                     continue

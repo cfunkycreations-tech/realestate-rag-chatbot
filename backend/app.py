@@ -1,5 +1,7 @@
 """Funk Bot: local-first, single-user chat service."""
 import asyncio
+import io
+import warnings
 import json
 import logging
 import os
@@ -14,10 +16,11 @@ import httpx
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError, VerificationError
 from cryptography.fernet import Fernet
-from fastapi import FastAPI, File, HTTPException, Query, Request, Response, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from itsdangerous import BadSignature, URLSafeTimedSerializer
 from pydantic import BaseModel, Field
+from PIL import Image, UnidentifiedImageError
 from sqlalchemy.exc import IntegrityError
 from funkbot.database import migrate, session
 from funkbot.events import EventPage, append_event, row_to_event
@@ -258,7 +261,7 @@ def vault_status(request: Request):
     return dict(row)
 
 @app.post('/api/vault/import')
-async def vault_import(request: Request, file: UploadFile = File(...)):
+async def vault_import(request: Request, file: UploadFile = File(...), collection: str = Form(default="", max_length=60)):
     require_auth(request)
     try:
         data=await file.read(MAX_ARCHIVE+1)
@@ -266,7 +269,7 @@ async def vault_import(request: Request, file: UploadFile = File(...)):
         keys=configured_secrets()
         with db() as c:
             c.execute('BEGIN IMMEDIATE')
-            result=import_zip(data,c,DATA / 'vault',keys)
+            result=import_zip(data,c,DATA / 'vault',keys,collection.strip())
         return result
     except VaultError as exc:
         raise HTTPException(400,str(exc)) from exc
@@ -544,6 +547,75 @@ def account_events(request: Request, since: int = Query(default=0, ge=0), limit:
         rows = c.execute('SELECT id,bot_id,run_id,event_type,payload,created_at FROM events WHERE id>? ORDER BY id LIMIT ?', (since, limit)).fetchall()
     events = [row_to_event(row) for row in rows]
     return EventPage(events=events, next_cursor=events[-1].id if events else since)
+
+@app.get('/api/team/overview')
+def team_overview(request: Request, day_start: float = Query(ge=0), bot_id: str | None = None):
+    """Counts and recent activity from the event log; day_start is local midnight in UTC seconds."""
+    require_auth(request)
+    if day_start > time.time() + 86400:
+        raise HTTPException(400, 'Invalid day start.')
+    with db() as c:
+        count = c.execute('SELECT COUNT(*) FROM bots').fetchone()[0]
+        runs = c.execute("SELECT COUNT(*) FROM events WHERE event_type='run.started' AND created_at>=?", (day_start,)).fetchone()[0]
+        last = c.execute('SELECT MAX(created_at) FROM events').fetchone()[0]
+        where = 'WHERE bot_id=?' if bot_id else ''
+        rows = c.execute(f'SELECT id,bot_id,run_id,event_type,payload,created_at FROM events {where} ORDER BY id DESC LIMIT 12', (bot_id,) if bot_id else ()).fetchall()
+        states = c.execute("""SELECT e.bot_id,e.payload FROM events e JOIN
+                    (SELECT bot_id,MAX(id) id FROM events WHERE event_type='bot.state_changed' GROUP BY bot_id) latest
+                    ON latest.id=e.id""").fetchall()
+    keys = configured_secrets()
+    events = []
+    for row in rows:
+        event = row_to_event(row).model_dump()
+        for field in ('summary', 'message'):
+            if field in event['payload']:
+                event['payload'][field] = redact_text(event['payload'][field], keys)
+        events.append(event)
+    return {'bots':count,'runs_today':runs,'last_activity':last,'events':events,
+            'states':{r['bot_id']:json.loads(r['payload'])['state'] for r in states if r['bot_id']}}
+
+
+@app.get('/api/settings/banner')
+def banner(request: Request):
+    require_auth(request)
+    path = DATA / 'banner.png'
+    if not path.is_file(): raise HTTPException(404, 'No banner uploaded.')
+    return FileResponse(path, media_type='image/png', headers={'Cache-Control':'private, no-store','X-Content-Type-Options':'nosniff'})
+
+
+@app.put('/api/settings/banner')
+async def upload_banner(request: Request, file: UploadFile = File(...)):
+    require_auth(request)
+    try:
+        data = await file.read(8 * 1024 * 1024 + 1)
+        if len(data) > 8 * 1024 * 1024: raise HTTPException(400, 'Banner must be 8 MB or smaller.')
+        with warnings.catch_warnings():
+            warnings.simplefilter('error', Image.DecompressionBombWarning)
+            with Image.open(io.BytesIO(data)) as image:
+                if image.format not in ('PNG', 'JPEG', 'WEBP') or image.width * image.height > 16_000_000:
+                    raise HTTPException(400, 'Choose a PNG, JPEG or WebP under 16 megapixels.')
+                image.load()
+                out = io.BytesIO()
+                image.convert('RGB').save(out, format='PNG', optimize=True)
+        tmp = DATA / ('banner-' + uuid.uuid4().hex + '.tmp')
+        try:
+            tmp.write_bytes(out.getvalue())
+            os.replace(tmp, DATA / 'banner.png')
+        finally:
+            tmp.unlink(missing_ok=True)
+        return {'ok':True}
+    except (UnidentifiedImageError, OSError, Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
+        raise HTTPException(400, 'Choose a valid image.') from exc
+    finally:
+        await file.close()
+
+
+@app.delete('/api/settings/banner')
+def remove_banner(request: Request):
+    require_auth(request)
+    (DATA / 'banner.png').unlink(missing_ok=True)
+    return {'ok':True}
+
 
 @app.get('/api/health')
 def health(): return {'status':'ok'}
