@@ -13,6 +13,7 @@ import app as service
 
 @pytest.fixture(autouse=True)
 def isolated_db(tmp_path, monkeypatch):
+    monkeypatch.setattr(service, 'DATA', tmp_path)
     monkeypatch.setattr(service, 'DB', tmp_path / 'test.db')
     service.jobs.clear()
     service.init_db()

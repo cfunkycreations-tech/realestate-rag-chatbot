@@ -1,6 +1,6 @@
 # Funk Bot
 
-Funk Bot is a local-first personal assistant workspace. This repository is a **first vertical slice**, not the full persistent-agent platform: it provides password-protected, persistent Bot identities and conversations, configurable OpenAI-compatible gateways, model-profile fallback, and reported token usage. It does not yet give Bots tools, a computer, autonomous routines, semantic memory, delegation, or groups. Do not use it for unattended work or assume it has the safety controls of a complete agent runtime.
+Funk Bot is a local-first personal assistant workspace. This repository is a **partial implementation**, not the full persistent-agent platform: it provides password-protected, persistent Bot identities and conversations, configurable OpenAI-compatible gateways, model-profile fallback, and reported token usage. It does not yet give Bots tools, a computer, autonomous routines, semantic memory, delegation, or groups. Do not use it for unattended work or assume it has the safety controls of a complete agent runtime.
 
 ## Quickstart (Docker Desktop)
 
@@ -38,6 +38,12 @@ npm run typecheck
 npm run lint
 npm run build
 ```
+
+## Character Vault
+
+Open **Settings → Character Vault**, then import a ZIP of PNGs from Sprite Grid Slicer. The importer reads `CharacterName`, `CharacterRole`, `Tags` and `Notes` (and `funk:` equivalents); `CharacterName` or `funk:name` is required. ZIPs are limited to 20 MB, 500 files and 64 MB uncompressed; individual PNGs are limited to 8 MB and 16 megapixels. Invalid files and duplicate names or files are skipped with counts. Names and artwork are not sent to the interface until a character is assigned to a Bot. A new Bot gets a weighted random character without replacement until the draw pool is exhausted; existing Bots and an empty Vault use the built-in shapes. Deleting a Bot returns its character to the available pool if no other Bot has it.
+
+Character images are stored in the same private data volume as the database; back up the whole volume. Image routes require login and a Bot assignment. Files on your own machine cannot be hidden from an administrator with filesystem access. There is no CLI, reroll, collection browser, per-character animation map or bulk editing in this slice. Imported notes are shown on reveal but are not automatically injected into prompts.
 
 ## Current behavior and limitations
 

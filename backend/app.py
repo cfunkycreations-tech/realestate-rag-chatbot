@@ -14,8 +14,8 @@ import httpx
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError, VerificationError
 from cryptography.fernet import Fernet
-from fastapi import FastAPI, HTTPException, Query, Request, Response
-from fastapi.responses import StreamingResponse
+from fastapi import FastAPI, File, HTTPException, Query, Request, Response, UploadFile
+from fastapi.responses import FileResponse, StreamingResponse
 from itsdangerous import BadSignature, URLSafeTimedSerializer
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
@@ -23,6 +23,7 @@ from funkbot.database import migrate, session
 from funkbot.events import EventPage, append_event, row_to_event
 from funkbot.auth_security import ensure_setup_token, lockout_seconds
 from funkbot.redaction import SlidingRedactor, redact_text
+from funkbot.vault import MAX_ARCHIVE, VaultError, character_for_bot, draw_character, import_zip
 
 DATA = Path(os.environ.get('FUNK_DATA_DIR', Path(__file__).parent.parent / 'data'))
 DATA.mkdir(parents=True, exist_ok=True)
@@ -180,17 +181,35 @@ class BotIn(BaseModel):
 def bots(request: Request):
     require_auth(request)
     with db() as c:
-        rows = c.execute('''SELECT b.*, (SELECT content FROM messages m WHERE m.bot_id=b.id ORDER BY created_at DESC LIMIT 1) as latest FROM bots b ORDER BY b.created_at''').fetchall()
-    return [dict(r) for r in rows]
+        rows = c.execute("""SELECT b.*, (SELECT content FROM messages m WHERE m.bot_id=b.id ORDER BY created_at DESC LIMIT 1) as latest,
+                            ch.name as character_name, ch.role as character_role, ch.tags as character_tags,
+                            ch.notes as character_notes, ch.rarity as character_rarity
+                            FROM bots b LEFT JOIN bot_characters bc ON bc.bot_id=b.id
+                            LEFT JOIN characters ch ON ch.id=bc.character_id ORDER BY b.created_at""").fetchall()
+    result=[]
+    for row in rows:
+        item=dict(row)
+        character = None
+        if item['character_name'] is not None:
+            character=character_for_bot({'name':item['character_name'], 'role':item['character_role'], 'tags':item['character_tags'],
+                                         'notes':item['character_notes'], 'rarity':item['character_rarity']}, item['id'])
+        for field in ('character_name','character_role','character_tags','character_notes','character_rarity'):
+            item.pop(field)
+        item['character']=character
+        result.append(item)
+    return result
 
 @app.post('/api/bots')
 def create_bot(body: BotIn, request: Request):
     require_auth(request)
+    name,title,personality=redact(body.name.strip()),redact(body.title.strip()),redact(body.personality)
     with db() as c:
+        c.execute('BEGIN IMMEDIATE')
         if c.execute('SELECT COUNT(*) FROM bots').fetchone()[0] >= 50: raise HTTPException(400, 'You can have up to 50 Bots.')
         id = str(uuid.uuid4())
-        c.execute('INSERT INTO bots VALUES (?,?,?,?,?,?,?,?)',(id,redact(body.name.strip()),redact(body.title.strip()),redact(body.personality),body.color,body.shape,body.profile,time.time()))
-    return {'id':id}
+        c.execute('INSERT INTO bots VALUES (?,?,?,?,?,?,?,?)',(id,name,title,personality,body.color,body.shape,body.profile,time.time()))
+        character=draw_character(c,id)
+    return {'id':id,'character':character}
 
 @app.put('/api/bots/{bot_id}')
 def update_bot(bot_id: str, body: BotIn, request: Request):
@@ -206,8 +225,43 @@ def delete_bot(bot_id: str, request: Request):
     with db() as c:
         c.execute('BEGIN IMMEDIATE')
         if c.execute("SELECT 1 FROM runs WHERE bot_id=? AND status IN ('queued','running','waiting_approval')", (bot_id,)).fetchone(): raise HTTPException(409, 'Wait for the current response before deleting this Bot.')
+        assignment=c.execute('SELECT character_id FROM bot_characters WHERE bot_id=?',(bot_id,)).fetchone()
         if not c.execute('DELETE FROM bots WHERE id=?',(bot_id,)).rowcount: raise HTTPException(404,'Bot not found.')
+        if assignment and not c.execute('SELECT 1 FROM bot_characters WHERE character_id=?',(assignment['character_id'],)).fetchone():
+            c.execute('UPDATE characters SET drawn=0 WHERE id=?',(assignment['character_id'],))
     return {'ok':True}
+
+@app.get('/api/bots/{bot_id}/avatar')
+def bot_avatar(bot_id: str, request: Request):
+    require_auth(request)
+    with db() as c:
+        row=c.execute('SELECT character_id FROM bot_characters WHERE bot_id=?',(bot_id,)).fetchone()
+    if not row: raise HTTPException(404, 'Character not found.')
+    path=DATA / 'vault' / (row['character_id'] + '.png')
+    if not path.is_file(): raise HTTPException(404, 'Character artwork is missing.')
+    return FileResponse(path, media_type='image/png', headers={'Cache-Control':'private, no-store','X-Content-Type-Options':'nosniff'})
+
+@app.get('/api/vault/status')
+def vault_status(request: Request):
+    require_auth(request)
+    with db() as c:
+        row=c.execute('SELECT COUNT(*) as total, COALESCE(SUM(CASE WHEN drawn=0 THEN 1 ELSE 0 END),0) as available FROM characters').fetchone()
+    return dict(row)
+
+@app.post('/api/vault/import')
+async def vault_import(request: Request, file: UploadFile = File(...)):
+    require_auth(request)
+    try:
+        data=await file.read(MAX_ARCHIVE+1)
+        if len(data)>MAX_ARCHIVE: raise VaultError('ZIP is too large (maximum 20 MB).')
+        with db() as c:
+            c.execute('BEGIN IMMEDIATE')
+            result=import_zip(data,c,DATA / 'vault')
+        return result
+    except VaultError as exc:
+        raise HTTPException(400,str(exc)) from exc
+    finally:
+        await file.close()
 
 @app.get('/api/bots/{bot_id}/messages')
 def messages(bot_id: str, request: Request):
