@@ -44,11 +44,28 @@ npm run build
 
 Open **Settings → Character Vault**, then import a ZIP of PNGs from Sprite Grid Slicer. The importer reads `CharacterName`, `CharacterRole`, `Tags` and `Notes` (and `funk:` equivalents); `CharacterName` or `funk:name` is required. ZIPs are limited to 20 MB, 500 files and 64 MB uncompressed; individual PNGs are limited to 8 MB and 16 megapixels. Invalid files and duplicate names or files are skipped with counts. Names and artwork are not sent to the interface until a character is assigned to a Bot. A new Bot gets a weighted random character without replacement until the draw pool is exhausted; existing Bots and an empty Vault use the built-in shapes. Deleting a Bot returns its character to the available pool if no other Bot has it.
 
-Character images are stored in the same private data volume as the database; back up the whole volume. Image routes require login and a Bot assignment. Files on your own machine cannot be hidden from an administrator with filesystem access. There is no CLI, reroll, collection browser, per-character animation map or bulk editing in this slice. Imported notes are shown on reveal but are not automatically injected into prompts.
+Character images are stored in the same private data volume as the database; back up the whole volume. Image routes require login and a Bot assignment. Files on your own machine cannot be hidden from an administrator with filesystem access. There is no CLI, reroll, per-character animation map or bulk editing in this slice. Imported notes are shown on reveal but are not automatically injected into prompts.
 
-## Office
+## Team Command Center and Office
 
-Choose **Office** in the sidebar to see Bots at desks and activity from the authenticated event feed. The canvas is a visualization only: it makes no model calls. **Try demo** plays an explicitly labeled scripted meeting and shows pathfinding to and from the meeting room. Live group chats and real meeting events are not implemented yet, so the live view does not invent them. The live feed begins with events recorded after the event-log upgrade. On a phone, swipe the canvas horizontally to explore; use the Bot buttons below it for a keyboard-accessible way to open a chat.
+**Gallery** is the home view. It shows assigned characters only; unassigned Vault art stays hidden. Search Bots, switch grid/list/cluster layout, or use the tag-based collection groups in the sidebar. At import, an optional collection tag is added to each newly imported character; duplicates are not modified. An untagged Bot appears in Uncategorized. The gallery paginates 60 Bots at a time and virtualizes visible rows; the sidebar limits its displayed Bot lists to 50, so use search to narrow them. Bot metadata is still fetched in one request, not server-paginated.
+
+Select a Bot to open its spotlight and chat. Quick Mission sends to the selected Bot through the same chat path. The Activity panel and status indicators come from recorded events. Runs today means `run.started` events since local midnight, not a count of historic runs that predate the event log. Last activity is the latest surviving event. No uptime or mission count is calculated. Upload or remove a private banner under **Settings → Appearance**; otherwise a gradient is shown.
+
+**Office** renders assigned sprites at desks, falling back to built-in shapes, with real recorded activity. It makes no model calls and displays 50 Bots per page. The earlier scripted demo is not exposed in this view because the Command Center is restricted to real Bots and recorded activity. Group chats and real meeting events are not implemented. The live feed starts with events recorded after the event-log upgrade. On a phone, swipe the canvas horizontally to explore; use the Bot buttons below it for a keyboard-accessible way to open a chat.
+
+### Browser screenshots
+
+The checked-in screenshots under `docs/screenshots` were captured with Playwright against a **disposable test installation** with synthetic Bots, artwork, and mock-gateway activity; they are not your data. To repeat, first set up a separate test installation with at least one Bot and a working test gateway. This test sends a message, so **never point it at your real installation**:
+
+```powershell
+Set-Location frontend
+npm ci
+npx playwright install chromium
+$env:E2E_URL = "http://localhost:3000"
+$env:E2E_PASSWORD = "your-disposable-test-password"
+npm run test:e2e
+```
 
 ## Current behavior and limitations
 
