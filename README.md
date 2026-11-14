@@ -10,7 +10,7 @@ Funk Bot is a local-first personal assistant workspace. This repository is a **f
 4. Open **Settings → Gateways**, save an OpenRouter key (or configure OmniRoute at `http://localhost:20128`), then test the saved connection. Keys are encrypted on disk and never returned by the API.
 5. Check **Model profiles**: choose models available through your gateway. Send your Bot a message.
 
-Docker volumes retain the database, vault key, and OmniRoute data across restarts. Back up the entire `funk_data` volume: the database and vault key are both needed to recover saved credentials. The OmniRoute container uses the upstream image. Its first start needs network access; check its logs if it fails. Never expose its dashboard publicly.
+Docker volumes retain the database, vault key, and OmniRoute data across restarts. For upgrades, rebuild from the same project folder and Compose project name so the existing volumes are reused; do not run `docker compose down -v`, which deletes them. Back up the entire `funk_data` volume: the database and vault key are both needed to recover saved credentials. The OmniRoute container uses the upstream image. Its first start needs network access; check its logs if it fails. Never expose its dashboard publicly.
 
 ## Local development
 
@@ -42,9 +42,10 @@ npm run build
 ## Current behavior and limitations
 
 - Each Bot has its own stored timeline and identity. The last 40 messages are sent as context; this is conversation history, not semantic memory. Deleting a Bot deletes its messages.
-- Chat runs in the backend and can finish after the browser closes, provided the backend keeps running. Runs do not survive backend restarts. Provider text streams as it arrives through a sliding-window redactor for saved gateway keys and common key patterns. The filter deliberately delays a small tail of text and cannot detect all possible secrets.
+- The database still uses SQLite directly with additive schema initialization, not SQLAlchemy or Alembic. The existing slice database is preserved, but the migration framework and PostgreSQL support are not implemented.
+- Chat runs in the backend and can finish after the browser closes, provided the backend keeps running. Run records and streamed events are stored in SQLite. Reopening a Bot reconnects to an active run; after a backend restart, unfinished runs are marked failed and surfaced in that Bot’s chat rather than automatically resumed. Run the backend with one worker only. Provider text streams through a sliding-window redactor for saved gateway keys and common key patterns. The filter deliberately delays a small tail of text and cannot detect all possible secrets.
 - Profiles attempt entries in order for rate limits, server failures, connection errors, and empty responses. Client errors stop the chain. The app does not yet implement tool calling or tool-call fallback.
 - Costs and token totals are shown only when gateways report them. No hard budget cap is enforced.
 - Vault encryption protects database contents from casual inspection, but its key is stored alongside the data on the same host. Protect filesystem access and backups. Messages and provider output are redacted for saved gateway keys and common key patterns; no redaction is perfect.
-- No search, file access, MCP, scheduler, webhook, sandbox, approvals, audit log, notifications, PWA, export, or browser/computer features are provided in this slice. The UI intentionally does not advertise those as working.
+- Run events are not yet a complete audit log. No search, file access, MCP, scheduler, webhook, sandbox, approvals, notifications, PWA, export, or browser/computer features are provided in this slice. The UI intentionally does not advertise those as working.
 - Provider names and defaults are configuration examples, not a guarantee that models are currently available. A working account/key and gateway configuration are required for live inference.

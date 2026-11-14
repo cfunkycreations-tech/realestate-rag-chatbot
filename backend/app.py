@@ -7,7 +7,7 @@ import secrets
 import sqlite3
 import time
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -41,11 +41,16 @@ signer = URLSafeTimedSerializer(session_secret, salt='funk-session')
 ph = PasswordHasher()
 DB = DATA / 'funk.db'
 
+@contextmanager
 def db():
     conn = sqlite3.connect(DB, timeout=10)
     conn.row_factory = sqlite3.Row
     conn.execute('PRAGMA foreign_keys=ON')
-    return conn
+    try:
+        with conn:
+            yield conn
+    finally:
+        conn.close()
 
 def init_db():
     with db() as c:
@@ -57,6 +62,10 @@ def init_db():
         CREATE TABLE IF NOT EXISTS usage (id INTEGER PRIMARY KEY, bot_id TEXT REFERENCES bots(id) ON DELETE SET NULL, gateway TEXT, model TEXT, prompt_tokens INTEGER, completion_tokens INTEGER, cost REAL, created_at REAL NOT NULL);
         CREATE TABLE IF NOT EXISTS login_guard (id INTEGER PRIMARY KEY CHECK (id=1), failures INTEGER NOT NULL DEFAULT 0, locked_until REAL NOT NULL DEFAULT 0);
         INSERT OR IGNORE INTO login_guard (id) VALUES (1);
+        CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE, status TEXT NOT NULL, created_at REAL NOT NULL, updated_at REAL NOT NULL);
+        CREATE UNIQUE INDEX IF NOT EXISTS one_active_run_per_bot ON runs(bot_id) WHERE status IN ('queued', 'running', 'waiting_approval');
+        CREATE TABLE IF NOT EXISTS run_events (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE, event_type TEXT NOT NULL, payload TEXT NOT NULL, created_at REAL NOT NULL);
+        CREATE INDEX IF NOT EXISTS run_events_order ON run_events(run_id, id);
         ''')
         defaults = {
             'gateways': json.dumps({'omniroute': {'url': os.getenv('OMNIROUTE_URL', 'http://localhost:20128/v1'), 'key': ''}, 'openrouter': {'url':'https://openrouter.ai/api/v1', 'key':''}, 'custom': {'url':'', 'key':''}}),
@@ -101,6 +110,7 @@ init_db()
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     # Only new installations need the one-time code. Existing volumes keep working.
+    mark_interrupted_runs()
     if config('password_hash') is None:
         token = ensure_setup_token(DATA)
         logging.getLogger('uvicorn.error').warning(
@@ -211,8 +221,9 @@ def update_bot(bot_id: str, body: BotIn, request: Request):
 @app.delete('/api/bots/{bot_id}')
 def delete_bot(bot_id: str, request: Request):
     require_auth(request)
-    if any(j['bot_id']==bot_id and not j['done'] for j in jobs.values()): raise HTTPException(409, 'Wait for the current response before deleting this Bot.')
     with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        if c.execute("SELECT 1 FROM runs WHERE bot_id=? AND status IN ('queued','running','waiting_approval')", (bot_id,)).fetchone(): raise HTTPException(409, 'Wait for the current response before deleting this Bot.')
         if not c.execute('DELETE FROM bots WHERE id=?',(bot_id,)).rowcount: raise HTTPException(404,'Bot not found.')
     return {'ok':True}
 
@@ -281,8 +292,56 @@ class ChatIn(BaseModel):
     content: str = Field(min_length=1,max_length=20000)
     profile: str | None = Field(default=None, pattern='^(fast|smart|thinker|vision|cheap-bulk)$')
 
+ACTIVE_STATUSES = ('queued', 'running', 'waiting_approval')
+
+def record_event(c, run_id, kind, values):
+    c.execute('INSERT INTO run_events (run_id,event_type,payload,created_at) VALUES (?,?,?,?)',
+              (run_id, kind, json.dumps(values), time.time()))
+
+def mark_interrupted_runs():
+    # This server runs one worker. A restart cannot resume an HTTP model stream;
+    # mark incomplete runs failed rather than silently losing them.
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        rows = c.execute("SELECT id FROM runs WHERE status IN ('queued','running','waiting_approval')").fetchall()
+        for row in rows:
+            record_event(c, row['id'], 'bot.state_changed', {'state':'error'})
+            record_event(c, row['id'], 'error', {'message':'The backend restarted before this response finished. Please try again.'})
+            c.execute("UPDATE runs SET status='failed', updated_at=? WHERE id=?", (time.time(), row['id']))
+
 def event(job, kind, **values):
-    job['events'].append({'type':kind, **values})
+    payload = {'type':kind, **values}
+    if 'id' in job:
+        with db() as c:
+            record_event(c, job['id'], kind, values)
+        job['notify'].set()
+    else:
+        # Lightweight direct-runtime tests do not create a persistent run.
+        job['events'].append(payload)
+
+def finish_run(job, status, kind, values=None, completion=None):
+    values = values or {}
+    if 'id' not in job:
+        event(job, kind, **values)
+        job['done'] = True
+        return
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        current = c.execute('SELECT status FROM runs WHERE id=?', (job['id'],)).fetchone()
+        if not current or current['status'] not in ACTIVE_STATUSES:
+            job['done'] = True
+            job['notify'].set()
+            return
+        if completion:
+            bot_id, content, gateway, model, usage = completion
+            c.execute('INSERT INTO messages VALUES (?,?,?,?,?)', (str(uuid.uuid4()), bot_id, 'assistant', content, time.time()))
+            c.execute('INSERT INTO usage (bot_id,gateway,model,prompt_tokens,completion_tokens,cost,created_at) VALUES (?,?,?,?,?,?,?)',
+                      (bot_id, gateway, model, usage.get('prompt_tokens',0), usage.get('completion_tokens',0), usage.get('cost'), time.time()))
+        record_event(c, job['id'], 'bot.state_changed', {'state':'done' if status == 'done' else 'error' if status == 'failed' else 'idle'})
+        record_event(c, job['id'], kind, values)
+        c.execute('UPDATE runs SET status=?,updated_at=? WHERE id=?', (status, time.time(), job['id']))
+    job['done'] = True
+    job['notify'].set()
 
 async def run_chat(job, bot, history, profile):
     entries=json.loads(config('profiles')).get(profile,[])
@@ -318,65 +377,105 @@ async def run_chat(job, bot, history, profile):
                     if safe:
                         content+=safe
                         event(job,'delta',content=safe)
-                    with db() as c:
-                        c.execute('INSERT INTO messages VALUES (?,?,?,?,?)',(str(uuid.uuid4()),bot['id'],'assistant',content,time.time()))
-                        c.execute('INSERT INTO usage (bot_id,gateway,model,prompt_tokens,completion_tokens,cost,created_at) VALUES (?,?,?,?,?,?,?)',(bot['id'],entry['gateway'],entry['model'],usage.get('prompt_tokens',0),usage.get('completion_tokens',0),usage.get('cost'),time.time()))
-                    event(job,'done'); job['done']=True; return
+                    if 'id' in job:
+                        finish_run(job, 'done', 'done', completion=(bot['id'],content,entry['gateway'],entry['model'],usage))
+                    else:
+                        # Direct runtime tests use the same storage behavior.
+                        with db() as c:
+                            c.execute('INSERT INTO messages VALUES (?,?,?,?,?)',(str(uuid.uuid4()),bot['id'],'assistant',content,time.time()))
+                            c.execute('INSERT INTO usage (bot_id,gateway,model,prompt_tokens,completion_tokens,cost,created_at) VALUES (?,?,?,?,?,?,?)',(bot['id'],entry['gateway'],entry['model'],usage.get('prompt_tokens',0),usage.get('completion_tokens',0),usage.get('cost'),time.time()))
+                        finish_run(job, 'done', 'done')
+                    return
         except asyncio.CancelledError:
-            event(job,'error',message='Response stopped.'); job['done']=True; return
+            finish_run(job,'cancelled','error',{'message':'Response stopped.'}); return
         except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
             # Only fail over on transient gateway errors or invalid/empty responses.
             status = exc.response.status_code if isinstance(exc,httpx.HTTPStatusError) else None
             if emitted or (status is not None and status not in (429,500,502,503,504)):
                 break
-    event(job,'error',message='Could not get a response from the configured models. Check gateway settings and try again.')
-    job['done']=True
+    finish_run(job, 'failed', 'error', {'message':'Could not get a response from the configured models. Check gateway settings and try again.'})
 
 @app.post('/api/bots/{bot_id}/chat')
 async def chat(bot_id: str, body: ChatIn, request: Request):
     require_auth(request)
-    if any(j['bot_id']==bot_id and not j['done'] for j in jobs.values()): raise HTTPException(409,'This Bot is already responding.')
+    # Compute redaction before acquiring the write lock: redact reads config.
+    content = redact(body.content)
+    job_id = str(uuid.uuid4())
     with db() as c:
+        c.execute('BEGIN IMMEDIATE')
         row=c.execute('SELECT * FROM bots WHERE id=?',(bot_id,)).fetchone()
         if not row: raise HTTPException(404,'Bot not found.')
-        bot=dict(row)
-        c.execute('INSERT INTO messages VALUES (?,?,?,?,?)',(str(uuid.uuid4()),bot_id,'user',redact(body.content),time.time()))
+        if c.execute("SELECT 1 FROM runs WHERE bot_id=? AND status IN ('queued','running','waiting_approval')", (bot_id,)).fetchone():
+            raise HTTPException(409,'This Bot is already responding.')
+        bot=dict(row); now=time.time()
+        c.execute('INSERT INTO runs VALUES (?,?,?,?,?)', (job_id,bot_id,'running',now,now))
+        record_event(c, job_id, 'bot.state_changed', {'state':'working'})
+        c.execute('INSERT INTO messages VALUES (?,?,?,?,?)',(str(uuid.uuid4()),bot_id,'user',content,now))
         history=[{'role':r['role'],'content':r['content']} for r in c.execute('SELECT role,content FROM messages WHERE bot_id=? ORDER BY created_at DESC LIMIT 40',(bot_id,)).fetchall()][::-1]
-    job_id=str(uuid.uuid4()); job={'bot_id':bot_id,'events':[],'done':False,'created':time.time()}; jobs[job_id]=job
+    job={'id':job_id,'bot_id':bot_id,'done':False,'created':time.time(),'notify':asyncio.Event()}; jobs[job_id]=job
     job['task']=asyncio.create_task(run_chat(job,bot,history,body.profile or bot['profile']))
     def finish_unexpected(task):
-        # Cancellation before the coroutine starts, or any unexpected error,
-        # must not leave the roster permanently busy. Do not expose exceptions.
         if not job['done']:
-            event(job, 'error', message='Response stopped.' if task.cancelled() else 'The response failed unexpectedly. Please try again.')
-            job['done'] = True
+            finish_run(job, 'cancelled' if task.cancelled() else 'failed', 'error', {'message':'Response stopped.' if task.cancelled() else 'The response failed unexpectedly. Please try again.'})
+        # Retrieve the exception to avoid leaking arbitrary provider data in logs.
+        if not task.cancelled(): task.exception()
     job['task'].add_done_callback(finish_unexpected)
-    # Limit retained completed jobs without disturbing active work.
     for k in list(jobs):
         if jobs[k]['done'] and jobs[k]['created'] < time.time()-3600: del jobs[k]
     return {'job_id':job_id}
 
-@app.get('/api/jobs/{job_id}/events')
-async def job_events(job_id: str, request: Request):
+@app.get('/api/bots/{bot_id}/latest-run')
+def latest_run(bot_id: str, request: Request):
     require_auth(request)
-    job=jobs.get(job_id)
-    if not job: raise HTTPException(404,'Run not found.')
+    with db() as c:
+        if not c.execute('SELECT 1 FROM bots WHERE id=?', (bot_id,)).fetchone():
+            raise HTTPException(404, 'Bot not found.')
+        row = c.execute('SELECT id,status FROM runs WHERE bot_id=? ORDER BY created_at DESC LIMIT 1', (bot_id,)).fetchone()
+        if not row: return None
+        result = dict(row)
+        if result['status'] == 'failed':
+            last_error = c.execute("SELECT payload FROM run_events WHERE run_id=? AND event_type='error' ORDER BY id DESC LIMIT 1", (row['id'],)).fetchone()
+            result['message'] = json.loads(last_error['payload']).get('message','The last response failed.') if last_error else 'The last response failed.'
+    return result
+
+@app.get('/api/jobs/{job_id}/events')
+async def job_events(job_id: str, request: Request, after: int = 0):
+    require_auth(request)
+    with db() as c:
+        if not c.execute('SELECT 1 FROM runs WHERE id=?',(job_id,)).fetchone(): raise HTTPException(404,'Run not found.')
     async def stream():
-        index=0
+        cursor=max(0,after)
         while True:
-            while index < len(job['events']):
-                yield 'data: '+json.dumps(job['events'][index])+'\n\n'; index+=1
-            if job['done']: break
+            current_job=jobs.get(job_id)
+            if current_job: current_job['notify'].clear()
+            with db() as c:
+                c.execute('BEGIN')  # Events and status must share a read snapshot.
+                rows=c.execute('SELECT id,event_type,payload FROM run_events WHERE run_id=? AND id>? ORDER BY id', (job_id,cursor)).fetchall()
+                run=c.execute('SELECT status FROM runs WHERE id=?',(job_id,)).fetchone()
+            for row in rows:
+                cursor=row['id']
+                yield 'data: '+json.dumps({'id':cursor,'type':row['event_type'], **json.loads(row['payload'])})+'\n\n'
+            if not run or run['status'] not in ACTIVE_STATUSES: break
             if await request.is_disconnected(): break
-            await asyncio.sleep(.2)
+            # Notification avoids polling. Heartbeats keep proxies alive.
+            if not current_job:
+                yield ': run unavailable on this worker\n\n'
+                break
+            try:
+                await asyncio.wait_for(current_job['notify'].wait(), timeout=15)
+            except asyncio.TimeoutError:
+                yield ': keep-alive\n\n'
     return StreamingResponse(stream(),media_type='text/event-stream',headers={'Cache-Control':'no-cache','X-Accel-Buffering':'no'})
 
 @app.post('/api/jobs/{job_id}/stop')
-def stop_job(job_id: str, request: Request):
+async def stop_job(job_id: str, request: Request):
     require_auth(request)
     job=jobs.get(job_id)
-    if not job: raise HTTPException(404,'Run not found.')
-    if not job['done']: job['task'].cancel()
+    with db() as c:
+        row=c.execute('SELECT status FROM runs WHERE id=?', (job_id,)).fetchone()
+    if not row: raise HTTPException(404,'Run not found.')
+    if row['status'] in ACTIVE_STATUSES and job and not job['done']:
+        job['task'].cancel()
     return {'ok':True}
 
 @app.get('/api/health')
