@@ -1,0 +1,61 @@
+"""Validated account-level events, separate from per-run streaming deltas."""
+import json
+import time
+from typing import Literal
+from pydantic import BaseModel, Field
+
+
+class RunStarted(BaseModel):
+    status: Literal['running']
+
+
+class RunFinished(BaseModel):
+    status: Literal['done', 'failed', 'cancelled']
+
+
+class StateChanged(BaseModel):
+    state: Literal['idle', 'working', 'done', 'error']
+
+
+class MessageSent(BaseModel):
+    message_id: str
+    role: Literal['user', 'assistant']
+    summary: str = Field(max_length=240)
+
+
+class ErrorRaised(BaseModel):
+    message: str = Field(max_length=500)
+
+
+PAYLOAD_TYPES = {
+    'run.started': RunStarted,
+    'run.finished': RunFinished,
+    'bot.state_changed': StateChanged,
+    'message.sent': MessageSent,
+    'error.raised': ErrorRaised,
+}
+
+
+class EventOut(BaseModel):
+    id: int
+    bot_id: str | None
+    run_id: str | None
+    type: Literal['run.started', 'run.finished', 'bot.state_changed', 'message.sent', 'error.raised']
+    payload: dict
+    created_at: float
+
+
+class EventPage(BaseModel):
+    events: list[EventOut]
+    next_cursor: int
+
+
+def append_event(connection, bot_id, run_id, kind, payload):
+    model = PAYLOAD_TYPES[kind].model_validate(payload)
+    connection.execute('INSERT INTO events (bot_id,run_id,event_type,payload,created_at) VALUES (?,?,?,?,?)',
+                       (bot_id, run_id, kind, model.model_dump_json(), time.time()))
+
+
+def row_to_event(row):
+    return EventOut(id=row['id'], bot_id=row['bot_id'], run_id=row['run_id'], type=row['event_type'],
+                    payload=json.loads(row['payload']), created_at=row['created_at'])

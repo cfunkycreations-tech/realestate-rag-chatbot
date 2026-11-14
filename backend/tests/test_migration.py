@@ -37,6 +37,6 @@ def test_slice2_database_migrates_without_data_loss(tmp_path, monkeypatch):
         assert c.execute('SELECT status FROM runs WHERE id=?',('r',)).fetchone()['status'] == 'done'
         assert c.execute('SELECT event_type FROM run_events WHERE run_id=?',('r',)).fetchone()['event_type'] == 'done'
         assert c.execute('SELECT completion_tokens FROM usage').fetchone()['completion_tokens'] == 7
-        assert c.execute('SELECT version_num FROM alembic_version').fetchone()[0] == '0001_adopt_slice2'
+        assert c.execute('SELECT version_num FROM alembic_version').fetchone()[0] == '0002_event_log'
     assert json.loads(service.config('gateways'))['openrouter']['key'] == encrypted
     assert service.gateway_config('openrouter')[1]['Authorization'] == 'Bearer ' + secret

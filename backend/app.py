@@ -14,12 +14,13 @@ import httpx
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError, VerificationError
 from cryptography.fernet import Fernet
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import StreamingResponse
 from itsdangerous import BadSignature, URLSafeTimedSerializer
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 from funkbot.database import migrate, session
+from funkbot.events import EventPage, append_event, row_to_event
 from funkbot.auth_security import ensure_setup_token, lockout_seconds
 from funkbot.redaction import SlidingRedactor, redact_text
 
@@ -278,17 +279,21 @@ ACTIVE_STATUSES = ('queued', 'running', 'waiting_approval')
 def record_event(c, run_id, kind, values):
     c.execute('INSERT INTO run_events (run_id,event_type,payload,created_at) VALUES (?,?,?,?)',
               (run_id, kind, json.dumps(values), time.time()))
+    if kind in ('bot.state_changed', 'error'):
+        bot_id = c.execute('SELECT bot_id FROM runs WHERE id=?', (run_id,)).fetchone()['bot_id']
+        append_event(c, bot_id, run_id, 'error.raised' if kind == 'error' else kind, values)
 
 def mark_interrupted_runs():
     # This server runs one worker. A restart cannot resume an HTTP model stream;
     # mark incomplete runs failed rather than silently losing them.
     with db() as c:
         c.execute('BEGIN IMMEDIATE')
-        rows = c.execute("SELECT id FROM runs WHERE status IN ('queued','running','waiting_approval')").fetchall()
+        rows = c.execute("SELECT id,bot_id FROM runs WHERE status IN ('queued','running','waiting_approval')").fetchall()
         for row in rows:
             record_event(c, row['id'], 'bot.state_changed', {'state':'error'})
             record_event(c, row['id'], 'error', {'message':'The backend restarted before this response finished. Please try again.'})
             c.execute("UPDATE runs SET status='failed', updated_at=? WHERE id=?", (time.time(), row['id']))
+            append_event(c, row['bot_id'], row['id'], 'run.finished', {'status':'failed'})
 
 def event(job, kind, **values):
     payload = {'type':kind, **values}
@@ -315,12 +320,15 @@ def finish_run(job, status, kind, values=None, completion=None):
             return
         if completion:
             bot_id, content, gateway, model, usage = completion
-            c.execute('INSERT INTO messages VALUES (?,?,?,?,?)', (str(uuid.uuid4()), bot_id, 'assistant', content, time.time()))
+            message_id = str(uuid.uuid4())
+            c.execute('INSERT INTO messages VALUES (?,?,?,?,?)', (message_id, bot_id, 'assistant', content, time.time()))
+            append_event(c, bot_id, job['id'], 'message.sent', {'message_id':message_id, 'role':'assistant', 'summary':content[:240]})
             c.execute('INSERT INTO usage (bot_id,gateway,model,prompt_tokens,completion_tokens,cost,created_at) VALUES (?,?,?,?,?,?,?)',
                       (bot_id, gateway, model, usage.get('prompt_tokens',0), usage.get('completion_tokens',0), usage.get('cost'), time.time()))
         record_event(c, job['id'], 'bot.state_changed', {'state':'done' if status == 'done' else 'error' if status == 'failed' else 'idle'})
         record_event(c, job['id'], kind, values)
         c.execute('UPDATE runs SET status=?,updated_at=? WHERE id=?', (status, time.time(), job['id']))
+        append_event(c, job['bot_id'], job['id'], 'run.finished', {'status':status})
     job['done'] = True
     job['notify'].set()
 
@@ -391,8 +399,11 @@ async def chat(bot_id: str, body: ChatIn, request: Request):
             raise HTTPException(409,'This Bot is already responding.')
         bot=dict(row); now=time.time()
         c.execute('INSERT INTO runs VALUES (?,?,?,?,?)', (job_id,bot_id,'running',now,now))
+        append_event(c, bot_id, job_id, 'run.started', {'status':'running'})
         record_event(c, job_id, 'bot.state_changed', {'state':'working'})
-        c.execute('INSERT INTO messages VALUES (?,?,?,?,?)',(str(uuid.uuid4()),bot_id,'user',content,now))
+        message_id = str(uuid.uuid4())
+        c.execute('INSERT INTO messages VALUES (?,?,?,?,?)',(message_id,bot_id,'user',content,now))
+        append_event(c, bot_id, job_id, 'message.sent', {'message_id':message_id, 'role':'user', 'summary':content[:240]})
         history=[{'role':r['role'],'content':r['content']} for r in c.execute('SELECT role,content FROM messages WHERE bot_id=? ORDER BY created_at DESC LIMIT 40',(bot_id,)).fetchall()][::-1]
     job={'id':job_id,'bot_id':bot_id,'done':False,'created':time.time(),'notify':asyncio.Event()}; jobs[job_id]=job
     job['task']=asyncio.create_task(run_chat(job,bot,history,body.profile or bot['profile']))
@@ -461,6 +472,14 @@ async def stop_job(job_id: str, request: Request):
         job['user_cancelled'] = True
         job['task'].cancel()
     return {'ok':True}
+
+@app.get('/api/events', response_model=EventPage)
+def account_events(request: Request, since: int = Query(default=0, ge=0), limit: int = Query(default=100, ge=1, le=500)):
+    require_auth(request)
+    with db() as c:
+        rows = c.execute('SELECT id,bot_id,run_id,event_type,payload,created_at FROM events WHERE id>? ORDER BY id LIMIT ?', (since, limit)).fetchall()
+    events = [row_to_event(row) for row in rows]
+    return EventPage(events=events, next_cursor=events[-1].id if events else since)
 
 @app.get('/api/health')
 def health(): return {'status':'ok'}
