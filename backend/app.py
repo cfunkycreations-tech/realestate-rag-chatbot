@@ -173,12 +173,13 @@ def logout(response: Response):
     return {'ok':True}
 
 class BotIn(BaseModel):
-    name: str = Field(min_length=1,max_length=60)
+    name: str = Field(default='New Bot', min_length=1,max_length=120)
     title: str = Field(default='Personal assistant', max_length=100)
     personality: str = Field(default='You are a helpful, thoughtful personal assistant.', max_length=6000)
     color: str = Field(default='lavender', pattern='^(lavender|peach|mint|blue|yellow)$')
     shape: str = Field(default='round', pattern='^(round|square|cloud)$')
     profile: str = Field(default='smart', pattern='^(fast|smart|thinker|vision|cheap-bulk)$')
+    use_character_name: bool = False
 
 def redact_character(character, keys):
     # Gateway keys saved after an import must not leak through old metadata.
@@ -215,12 +216,38 @@ def bots(request: Request):
 def create_bot(body: BotIn, request: Request):
     require_auth(request)
     name,title,personality=redact(body.name.strip()),redact(body.title.strip()),redact(body.personality)
+    keys=configured_secrets()
     with db() as c:
         c.execute('BEGIN IMMEDIATE')
         id = str(uuid.uuid4())
         c.execute('INSERT INTO bots VALUES (?,?,?,?,?,?,?,?)',(id,name,title,personality,body.color,body.shape,body.profile,time.time()))
         character=draw_character(c,id)
+        if character and body.use_character_name:
+            c.execute('UPDATE bots SET name=? WHERE id=?', (redact_text(character['name'], keys),id))
     return {'id':id,'character':redact_character(character, configured_secrets()) if character else None}
+
+class SpriteChoice(BaseModel):
+    adopt_character_name: bool
+
+
+@app.post('/api/bots/{bot_id}/sprite')
+def give_sprite(bot_id: str, body: SpriteChoice, request: Request):
+    require_auth(request)
+    keys = configured_secrets()
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        if not c.execute('SELECT 1 FROM bots WHERE id=?', (bot_id,)).fetchone():
+            raise HTTPException(404, 'Bot not found.')
+        if c.execute('SELECT 1 FROM bot_characters WHERE bot_id=?', (bot_id,)).fetchone():
+            raise HTTPException(409, 'This Bot already has a sprite. Its existing sprite was not changed.')
+        character = draw_character(c, bot_id)
+        if not character:
+            raise HTTPException(409, 'The Character Vault is empty. Import characters first.')
+        character = redact_character(character, keys)
+        if body.adopt_character_name:
+            c.execute('UPDATE bots SET name=? WHERE id=?', (character['name'], bot_id))
+    return {'character':character}
+
 
 @app.put('/api/bots/{bot_id}')
 def update_bot(bot_id: str, body: BotIn, request: Request):
@@ -398,13 +425,16 @@ def finish_run(job, status, kind, values=None, completion=None):
     job['done'] = True
     job['notify'].set()
 
+def bot_system_prompt(bot):
+    return bot['personality'] + '\nYou are ' + bot['name'] + '. Your job title is ' + (bot.get('title') or 'Personal assistant') + '. Perform that job for the user.'
+
 async def run_chat(job, bot, history, profile):
     entries=json.loads(config('profiles')).get(profile,[])
     for entry in entries:
         emitted=False
         try:
             url, headers=gateway_config(entry['gateway'])
-            payload={'model':entry['model'], 'messages':[{'role':'system','content':bot['personality']+'\nYou are '+bot['name']+'.'}, *history], 'stream':True, 'stream_options':{'include_usage':True}}
+            payload={'model':entry['model'], 'messages':[{'role':'system','content':bot_system_prompt(bot)}, *history], 'stream':True, 'stream_options':{'include_usage':True}}
             async with httpx.AsyncClient(timeout=httpx.Timeout(90, connect=10), follow_redirects=False) as client:
                 async with client.stream('POST', url+'/chat/completions', headers=headers, json=payload) as response:
                     response.raise_for_status()
