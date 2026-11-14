@@ -5,8 +5,8 @@ Funk Bot is a local-first personal assistant workspace. This repository is a **f
 ## Quickstart (Docker Desktop)
 
 1. Install and start Docker Desktop. On Windows, enable its WSL 2 backend.
-2. Copy `.env.example` to `.env`, then run `docker compose up --build`.
-3. Open `http://localhost:3000`, create a password, and create a Bot.
+2. In PowerShell, run `Copy-Item .env.example .env` and `docker compose up --build`.
+3. For a new installation only, open another PowerShell window in the project folder and run `docker compose logs backend`. Find the **first-run setup code**. Open `http://localhost:3000`, enter that code and create a password and Bot. Existing installations retain their password and do not need a setup code.
 4. Open **Settings → Gateways**, save an OpenRouter key (or configure OmniRoute at `http://localhost:20128`), then test the saved connection. Keys are encrypted on disk and never returned by the API.
 5. Check **Model profiles**: choose models available through your gateway. Send your Bot a message.
 
@@ -16,25 +16,27 @@ Docker volumes retain the database, vault key, and OmniRoute data across restart
 
 Python 3.12 and Node 22 are recommended. From the repository root:
 
-```sh
+```powershell
 python -m venv .venv
-# Windows: .venv\Scripts\activate
-# macOS/Linux: source .venv/bin/activate
-pip install -r backend/requirements.txt
-cd backend && uvicorn app:app --host 0.0.0.0 --port 8000
-# in another terminal
-cd frontend && npm ci && npm run dev
+.\.venv\Scripts\python.exe -m pip install -r backend/requirements-dev.txt
+Set-Location backend
+..\.venv\Scripts\python.exe -m uvicorn app:app --host 0.0.0.0 --port 8000
+# In another PowerShell window, from the repository root:
+Set-Location frontend
+npm ci
+npm run dev
 ```
 
-Open `http://localhost:3000`. The frontend proxies `/api` to the backend; use `BACKEND_URL` to override the server-side target. Local data lives in `data/`; set `FUNK_DATA_DIR` to change it. `OMNIROUTE_URL` changes the initial default gateway URL. `FUNK_SESSION_SECRET` can override the automatically generated signing key. For HTTPS deployment set `FUNK_SECURE_COOKIE=1`, terminate TLS, and restrict both the application and OmniRoute to trusted users. This is single-user software, not a hardened multi-tenant service; password login is not rate-limited and the setup endpoint must not be exposed to an untrusted network before setup.
+Open `http://localhost:3000`. The frontend proxies `/api` to the backend; use `BACKEND_URL` to override the server-side target. Local data lives in `data/`; set `FUNK_DATA_DIR` to change it. `OMNIROUTE_URL` changes the initial default gateway URL. `FUNK_SESSION_SECRET` can override the automatically generated signing key. For HTTPS deployment set `FUNK_SECURE_COOKIE=1`, terminate TLS, and restrict both the application and OmniRoute to trusted users. This is single-user software, not a hardened multi-tenant service. Login attempts have account-wide backoff. A new installation requires a one-time code from the backend logs; anyone with access to those logs or the data directory can set up the account. Do not expose an uninitialized installation to an untrusted network.
 
 ## Checks
 
-```sh
-make test       # backend unit/integration tests
-make typecheck  # TypeScript
-make lint       # TypeScript check
-cd frontend && npm run build
+```powershell
+.\.venv\Scripts\python.exe -m pytest -q backend/tests
+cd frontend
+npm run typecheck
+npm run lint
+npm run build
 ```
 
 ## Current behavior and limitations

@@ -1,0 +1,1 @@
+"""Funk Bot application components."""

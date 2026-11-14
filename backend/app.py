@@ -1,6 +1,7 @@
 """Funk Bot: local-first, single-user chat service."""
 import asyncio
 import json
+import logging
 import os
 import re
 import secrets
@@ -19,6 +20,7 @@ from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 from itsdangerous import BadSignature, URLSafeTimedSerializer
 from pydantic import BaseModel, Field
+from funkbot.auth_security import ensure_setup_token, lockout_seconds
 
 DATA = Path(os.environ.get('FUNK_DATA_DIR', Path(__file__).parent.parent / 'data'))
 DATA.mkdir(parents=True, exist_ok=True)
@@ -53,6 +55,8 @@ def init_db():
         CREATE TABLE IF NOT EXISTS bots (id TEXT PRIMARY KEY, name TEXT NOT NULL, title TEXT NOT NULL, personality TEXT NOT NULL, color TEXT NOT NULL, shape TEXT NOT NULL, profile TEXT NOT NULL, created_at REAL NOT NULL);
         CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE, role TEXT NOT NULL, content TEXT NOT NULL, created_at REAL NOT NULL);
         CREATE TABLE IF NOT EXISTS usage (id INTEGER PRIMARY KEY, bot_id TEXT REFERENCES bots(id) ON DELETE SET NULL, gateway TEXT, model TEXT, prompt_tokens INTEGER, completion_tokens INTEGER, cost REAL, created_at REAL NOT NULL);
+        CREATE TABLE IF NOT EXISTS login_guard (id INTEGER PRIMARY KEY CHECK (id=1), failures INTEGER NOT NULL DEFAULT 0, locked_until REAL NOT NULL DEFAULT 0);
+        INSERT OR IGNORE INTO login_guard (id) VALUES (1);
         ''')
         defaults = {
             'gateways': json.dumps({'omniroute': {'url': os.getenv('OMNIROUTE_URL', 'http://localhost:20128/v1'), 'key': ''}, 'openrouter': {'url':'https://openrouter.ai/api/v1', 'key':''}, 'custom': {'url':'', 'key':''}}),
@@ -89,11 +93,25 @@ def validate_url(url):
     return url.rstrip('/')
 
 init_db()
-app = FastAPI(title='Funk Bot')
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    # Only new installations need the one-time code. Existing volumes keep working.
+    if config('password_hash') is None:
+        token = ensure_setup_token(DATA)
+        logging.getLogger('uvicorn.error').warning(
+            'Funk Bot first-run setup code (enter this in the setup screen): %s', token
+        )
+    yield
+
+app = FastAPI(title='Funk Bot', lifespan=lifespan)
 jobs = {}
 
 class Password(BaseModel):
     password: str = Field(min_length=8, max_length=256)
+
+class SetupPassword(Password):
+    setup_token: str = Field(default='', max_length=256)
 
 @app.get('/api/auth/status')
 def auth_status(request: Request):
@@ -103,20 +121,49 @@ def auth_status(request: Request):
     return {'setup': config('password_hash') is not None, 'authenticated': authenticated}
 
 @app.post('/api/auth/setup')
-def setup(body: Password, response: Response):
-    # Atomic first-run initialization prevents a concurrent setup from replacing the password.
+def setup(body: SetupPassword, response: Response):
+    # Do not reveal the setup code via the API. The file is readable only to
+    # the installation owner; the code is printed to the backend startup log.
+    if config('password_hash') is not None:
+        raise HTTPException(409, 'Setup is already complete.')
+    token_file = DATA / 'setup.token'
+    try:
+        expected = token_file.read_text(encoding='utf-8').strip()
+    except FileNotFoundError:
+        raise HTTPException(503, 'Setup code unavailable. Restart the backend.')
+    if not body.setup_token or not secrets.compare_digest(expected, body.setup_token):
+        raise HTTPException(403, 'Incorrect setup code. Check the backend logs.')
     with db() as c:
         try: c.execute('INSERT INTO config VALUES (?,?)', ('password_hash', ph.hash(body.password)))
         except sqlite3.IntegrityError: raise HTTPException(409, 'Setup is already complete.')
+    token_file.unlink(missing_ok=True)
     response.set_cookie('funk_session', signer.dumps('owner'), httponly=True, samesite='strict', max_age=2592000, secure=os.getenv('FUNK_SECURE_COOKIE') == '1')
     return {'ok': True}
 
 @app.post('/api/auth/login')
 def login(body: Password, response: Response):
-    stored = config('password_hash')
-    try:
-        if not stored or not ph.verify(stored, body.password): raise HTTPException(401, 'Incorrect password.')
-    except (VerifyMismatchError, VerificationError): raise HTTPException(401, 'Incorrect password.')
+    # The account-wide guard is stored in SQLite, not keyed by a proxy-provided
+    # IP. BEGIN IMMEDIATE serializes attempts across threads and processes.
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        guard = c.execute('SELECT failures, locked_until FROM login_guard WHERE id=1').fetchone()
+        remaining = guard['locked_until'] - time.time()
+        if remaining > 0:
+            c.commit()
+            raise HTTPException(429, 'Too many attempts. Please wait and try again.', headers={'Retry-After': str(max(1, int(remaining) + 1))})
+        row = c.execute('SELECT value FROM config WHERE key=?', ('password_hash',)).fetchone()
+        valid = False
+        try:
+            valid = bool(row and ph.verify(row['value'], body.password))
+        except (VerifyMismatchError, VerificationError):
+            pass
+        if not valid:
+            failures = guard['failures'] + 1
+            c.execute('UPDATE login_guard SET failures=?, locked_until=? WHERE id=1', (failures, time.time() + lockout_seconds(failures)))
+            c.commit()
+            raise HTTPException(401, 'Incorrect password.')
+        c.execute('UPDATE login_guard SET failures=0, locked_until=0 WHERE id=1')
+        c.commit()
     response.set_cookie('funk_session', signer.dumps('owner'), httponly=True, samesite='strict', max_age=2592000, secure=os.getenv('FUNK_SECURE_COOKIE') == '1')
     return {'ok': True}
 

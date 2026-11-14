@@ -23,7 +23,7 @@ def isolated_db(tmp_path, monkeypatch):
 
 
 def setup(client):
-    assert client.post('/api/auth/setup', json={'password': 'correct horse battery staple'}).status_code == 200
+    assert client.post('/api/auth/setup', json={'password': 'correct horse battery staple', 'setup_token': service.ensure_setup_token(service.DATA)}).status_code == 200
 
 
 def test_auth_and_persistent_bot_deletion():
@@ -135,3 +135,56 @@ def test_chat_http_flow_and_restart_persistence(monkeypatch):
         messages = client.get(f'/api/bots/{bot}/messages').json()
         assert [m['content'] for m in messages] == ['Make a plan', 'A useful answer.']
         assert client.get('/api/settings').json()['usage']['completion_tokens'] == 3
+
+
+def test_setup_requires_one_time_token():
+    with TestClient(service.app) as client:
+        assert client.post('/api/auth/setup', json={'password':'long enough password'}).status_code == 403
+        assert client.post('/api/auth/setup', json={'password':'long enough password', 'setup_token':'wrong'}).status_code == 403
+        token = service.ensure_setup_token(service.DATA)
+        assert token not in client.get('/api/auth/status').text
+        assert client.post('/api/auth/setup', json={'password':'long enough password', 'setup_token':token}).status_code == 200
+        assert not (service.DATA / 'setup.token').exists()
+        assert client.post('/api/auth/setup', json={'password':'long enough password', 'setup_token':token}).status_code == 409
+
+
+def test_login_backoff_is_persistent():
+    with TestClient(service.app) as client:
+        setup(client)
+        client.post('/api/auth/logout')
+        for _ in range(5):
+            assert client.post('/api/auth/login', json={'password':'incorrect password'}).status_code == 401
+        response = client.post('/api/auth/login', json={'password':'correct horse battery staple'})
+        assert response.status_code == 429 and int(response.headers['retry-after']) >= 1
+        service.init_db()
+        assert client.post('/api/auth/login', json={'password':'correct horse battery staple'}).status_code == 429
+        with service.db() as c:
+            c.execute('UPDATE login_guard SET locked_until=0 WHERE id=1')
+        assert client.post('/api/auth/login', json={'password':'correct horse battery staple'}).status_code == 200
+        with service.db() as c:
+            assert c.execute('SELECT failures FROM login_guard').fetchone()[0] == 0
+
+
+def test_slice_one_database_upgrade_preserves_existing_data(tmp_path, monkeypatch):
+    """The additive login guard must not recreate or erase the user's old DB."""
+    old = tmp_path / 'old.db'
+    import sqlite3
+    with sqlite3.connect(old) as c:
+        c.executescript('''
+        CREATE TABLE config (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE bots (id TEXT PRIMARY KEY, name TEXT NOT NULL, title TEXT NOT NULL, personality TEXT NOT NULL, color TEXT NOT NULL, shape TEXT NOT NULL, profile TEXT NOT NULL, created_at REAL NOT NULL);
+        CREATE TABLE messages (id TEXT PRIMARY KEY, bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE, role TEXT NOT NULL, content TEXT NOT NULL, created_at REAL NOT NULL);
+        CREATE TABLE usage (id INTEGER PRIMARY KEY, bot_id TEXT REFERENCES bots(id) ON DELETE SET NULL, gateway TEXT, model TEXT, prompt_tokens INTEGER, completion_tokens INTEGER, cost REAL, created_at REAL NOT NULL);
+        ''')
+        c.execute('INSERT INTO config VALUES (?,?)', ('password_hash', service.ph.hash('existing password')))
+        c.execute('INSERT INTO bots VALUES (?,?,?,?,?,?,?,?)', ('old-bot','Existing','Assistant','Help','mint','round','smart',1))
+        c.execute('INSERT INTO messages VALUES (?,?,?,?,?)', ('old-msg','old-bot','user','Hello from before',2))
+        c.execute('INSERT INTO usage VALUES (?,?,?,?,?,?,?,?)', (1,'old-bot','openrouter','test',3,4,0.01,2))
+    monkeypatch.setattr(service, 'DB', old)
+    service.init_db()
+    with TestClient(service.app) as client:
+        assert client.get('/api/auth/status').json()['setup'] is True
+        assert client.post('/api/auth/login', json={'password':'existing password'}).status_code == 200
+        assert client.get('/api/bots').json()[0]['name'] == 'Existing'
+        assert client.get('/api/bots/old-bot/messages').json()[0]['content'] == 'Hello from before'
+        assert client.get('/api/settings').json()['usage']['completion_tokens'] == 4
