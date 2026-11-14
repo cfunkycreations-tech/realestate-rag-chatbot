@@ -1,4 +1,11 @@
-node_modules
-dist
 .env
-*.local
+.env.local
+node_modules/
+.next/
+__pycache__/
+.pytest_cache/
+*.pyc
+data/
+.venv/
+coverage/
+*.tsbuildinfo
