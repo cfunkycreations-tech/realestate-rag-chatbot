@@ -4,17 +4,17 @@ from test_app import setup
 from test_vault import png, archive
 
 
-def test_new_bot_uses_vault_name_only_when_requested_and_job_is_separate():
+def test_new_bot_uses_vault_name_and_job_is_separate():
     with TestClient(service.app) as client:
         setup(client)
         client.post('/api/vault/import', files={'file':('a.zip',archive([('a.png',png('Zigzag',role='Cosmic Gnome'))]),'application/zip')})
-        created=client.post('/api/bots',json={'name':'Fallback','title':'Editor','personality':'Edit thoughtfully','use_character_name':True}).json()
+        created=client.post('/api/bots',json={'name':'Fallback','title':'Editor','personality':'Edit thoughtfully'}).json()
         bot=next(b for b in client.get('/api/bots').json() if b['id']==created['id'])
         assert (bot['name'],bot['title'],bot['character']['role'])==('Zigzag','Editor','Cosmic Gnome')
         prompt=service.bot_system_prompt(bot)
         assert 'Zigzag' in prompt and 'Editor' in prompt and 'Cosmic Gnome' not in prompt
         legacy=client.post('/api/bots',json={'name':'Existing client','title':'Researcher'}).json()
-        assert next(b for b in client.get('/api/bots').json() if b['id']==legacy['id'])['name']=='Existing client'
+        assert next(b for b in client.get('/api/bots').json() if b['id']==legacy['id'])['name']=='Zigzag'
 
 
 def test_existing_bot_sprite_requires_explicit_choice_and_preserves_other_fields():

@@ -179,7 +179,6 @@ class BotIn(BaseModel):
     color: str = Field(default='lavender', pattern='^(lavender|peach|mint|blue|yellow)$')
     shape: str = Field(default='round', pattern='^(round|square|cloud)$')
     profile: str = Field(default='smart', pattern='^(fast|smart|thinker|vision|cheap-bulk)$')
-    use_character_name: bool = False
 
 def redact_character(character, keys):
     # Gateway keys saved after an import must not leak through old metadata.
@@ -201,6 +200,9 @@ def bots(request: Request):
     keys=configured_secrets()
     for row in rows:
         item=dict(row)
+        for field in ('name','title','personality','latest'):
+            if item[field] is not None:
+                item[field] = redact_text(item[field], keys)
         character = None
         if item['character_name'] is not None:
             character=character_for_bot({'name':item['character_name'], 'role':item['character_role'], 'tags':item['character_tags'],
@@ -222,7 +224,7 @@ def create_bot(body: BotIn, request: Request):
         id = str(uuid.uuid4())
         c.execute('INSERT INTO bots VALUES (?,?,?,?,?,?,?,?)',(id,name,title,personality,body.color,body.shape,body.profile,time.time()))
         character=draw_character(c,id)
-        if character and body.use_character_name:
+        if character:
             c.execute('UPDATE bots SET name=? WHERE id=?', (redact_text(character['name'], keys),id))
     return {'id':id,'character':redact_character(character, configured_secrets()) if character else None}
 
@@ -485,7 +487,8 @@ async def run_chat(job, bot, history, profile):
 async def chat(bot_id: str, body: ChatIn, request: Request):
     require_auth(request)
     # Compute redaction before acquiring the write lock: redact reads config.
-    content = redact(body.content)
+    keys = configured_secrets()
+    content = redact_text(body.content, keys)
     job_id = str(uuid.uuid4())
     with db() as c:
         c.execute('BEGIN IMMEDIATE')
@@ -493,7 +496,10 @@ async def chat(bot_id: str, body: ChatIn, request: Request):
         if not row: raise HTTPException(404,'Bot not found.')
         if c.execute("SELECT 1 FROM runs WHERE bot_id=? AND status IN ('queued','running','waiting_approval')", (bot_id,)).fetchone():
             raise HTTPException(409,'This Bot is already responding.')
-        bot=dict(row); now=time.time()
+        bot=dict(row)
+        for field in ('name','title','personality'):
+            bot[field] = redact_text(bot[field], keys)
+        now=time.time()
         c.execute('INSERT INTO runs VALUES (?,?,?,?,?)', (job_id,bot_id,'running',now,now))
         append_event(c, bot_id, job_id, 'run.started', {'status':'running'})
         record_event(c, job_id, 'bot.state_changed', {'state':'working'})
