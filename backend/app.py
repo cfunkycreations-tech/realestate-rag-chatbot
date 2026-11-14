@@ -3,7 +3,6 @@ import asyncio
 import json
 import logging
 import os
-import re
 import secrets
 import sqlite3
 import time
@@ -21,6 +20,7 @@ from fastapi.responses import StreamingResponse
 from itsdangerous import BadSignature, URLSafeTimedSerializer
 from pydantic import BaseModel, Field
 from funkbot.auth_security import ensure_setup_token, lockout_seconds
+from funkbot.redaction import SlidingRedactor, redact_text
 
 DATA = Path(os.environ.get('FUNK_DATA_DIR', Path(__file__).parent.parent / 'data'))
 DATA.mkdir(parents=True, exist_ok=True)
@@ -72,14 +72,18 @@ def config(key, fallback=None):
 def set_config(key, value):
     with db() as c: c.execute('INSERT OR REPLACE INTO config VALUES (?,?)',(key,value))
 
-def redact(text):
+def configured_secrets():
+    found = []
     for gateway in json.loads(config('gateways','{}')).values():
         try:
             if gateway.get('key'):
-                key = cipher.decrypt(gateway['key'].encode()).decode()
-                if key: text = text.replace(key, '[redacted]')
-        except Exception: pass
-    return re.sub(r'(?i)\b(sk-[A-Za-z0-9_-]{12,}|Bearer\s+[A-Za-z0-9._-]{12,})', '[redacted]', text)
+                found.append(cipher.decrypt(gateway['key'].encode()).decode())
+        except Exception:
+            pass
+    return found
+
+def redact(text):
+    return redact_text(text, configured_secrets())
 
 def require_auth(request: Request):
     try:
@@ -291,6 +295,7 @@ async def run_chat(job, bot, history, profile):
                 async with client.stream('POST', url+'/chat/completions', headers=headers, json=payload) as response:
                     response.raise_for_status()
                     content=''; usage={}
+                    redactor=SlidingRedactor(configured_secrets() + [headers.get('Authorization', '').removeprefix('Bearer ')])
                     async for line in response.aiter_lines():
                         if job.get('cancel'): raise asyncio.CancelledError()
                         if not line.startswith('data:'): continue
@@ -303,12 +308,16 @@ async def run_chat(job, bot, history, profile):
                         choices=chunk.get('choices') or []
                         delta=choices[0].get('delta',{}).get('content') if choices else None
                         if isinstance(delta,str) and delta:
-                            # Don't stream stored gateway keys even if a model echoes them.
-                            content+=delta; emitted=True
-                    if not content: raise ValueError('Gateway returned an empty response')
-                    content=redact(content)
-                    # Buffer before emitting to avoid leaking secrets split across stream chunks.
-                    event(job,'delta',content=content)
+                            emitted=True
+                            safe=redactor.feed(delta)
+                            if safe:
+                                content+=safe
+                                event(job,'delta',content=safe)
+                    if not emitted: raise ValueError('Gateway returned an empty response')
+                    safe=redactor.finish()
+                    if safe:
+                        content+=safe
+                        event(job,'delta',content=safe)
                     with db() as c:
                         c.execute('INSERT INTO messages VALUES (?,?,?,?,?)',(str(uuid.uuid4()),bot['id'],'assistant',content,time.time()))
                         c.execute('INSERT INTO usage (bot_id,gateway,model,prompt_tokens,completion_tokens,cost,created_at) VALUES (?,?,?,?,?,?,?)',(bot['id'],entry['gateway'],entry['model'],usage.get('prompt_tokens',0),usage.get('completion_tokens',0),usage.get('cost'),time.time()))

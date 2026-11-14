@@ -42,7 +42,7 @@ npm run build
 ## Current behavior and limitations
 
 - Each Bot has its own stored timeline and identity. The last 40 messages are sent as context; this is conversation history, not semantic memory. Deleting a Bot deletes its messages.
-- Chat runs in the backend and can finish after the browser closes, provided the backend keeps running. Runs do not survive backend restarts. Provider responses are buffered before display to prevent a key split across chunks from leaking; live token streaming is not yet implemented.
+- Chat runs in the backend and can finish after the browser closes, provided the backend keeps running. Runs do not survive backend restarts. Provider text streams as it arrives through a sliding-window redactor for saved gateway keys and common key patterns. The filter deliberately delays a small tail of text and cannot detect all possible secrets.
 - Profiles attempt entries in order for rate limits, server failures, connection errors, and empty responses. Client errors stop the chain. The app does not yet implement tool calling or tool-call fallback.
 - Costs and token totals are shown only when gateways report them. No hard budget cap is enforced.
 - Vault encryption protects database contents from casual inspection, but its key is stored alongside the data on the same host. Protect filesystem access and backups. Messages and provider output are redacted for saved gateway keys and common key patterns; no redaction is perfect.

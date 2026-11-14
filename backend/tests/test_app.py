@@ -1,25 +1,11 @@
 import asyncio
 import json
-import os
-import sys
-import tempfile
-from pathlib import Path
 
 import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-# Keep module initialization out of the real workspace database.
-os.environ['FUNK_DATA_DIR'] = tempfile.mkdtemp(prefix='funk-bot-tests-')
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import app as service
-
-
-@pytest.fixture(autouse=True)
-def isolated_db(tmp_path, monkeypatch):
-    monkeypatch.setattr(service, 'DB', tmp_path / 'test.db')
-    service.jobs.clear()
-    service.init_db()
 
 
 def setup(client):
@@ -127,7 +113,10 @@ def test_chat_http_flow_and_restart_persistence(monkeypatch):
         bot = client.post('/api/bots', json={'name': 'Scout'}).json()['id']
         run = client.post(f'/api/bots/{bot}/chat', json={'content':'Make a plan'}).json()['job_id']
         events = client.get(f'/api/jobs/{run}/events')
-        assert events.status_code == 200 and 'A useful answer.' in events.text and '"done"' in events.text
+        payloads = [json.loads(line[6:]) for line in events.text.splitlines() if line.startswith('data: ')]
+        assert events.status_code == 200
+        assert ''.join(e.get('content', '') for e in payloads) == 'A useful answer.'
+        assert payloads[-1]['type'] == 'done'
     # A fresh client and database initialization simulate a server restart.
     service.init_db()
     with TestClient(service.app) as client:
