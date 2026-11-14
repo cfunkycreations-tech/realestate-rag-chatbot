@@ -46,3 +46,13 @@ def test_collection_tag_added_at_import():
         assert response.json()['added']==1
         bot=client.post('/api/bots',json={'name':'Bot'}).json()
         assert bot['character']['tags']==['design','cheerful','Space']
+
+
+def test_roster_supports_more_than_fifty_bots():
+    with TestClient(service.app) as client:
+        setup(client)
+        with service.db() as c:
+            for i in range(50):
+                c.execute('INSERT INTO bots VALUES (?,?,?,?,?,?,?,?)', (str(i),f'Bot {i}','Role','Instructions','mint','round','smart',i))
+        assert client.post('/api/bots',json={'name':'Bot 51'}).status_code==200
+        assert len(client.get('/api/bots').json())==51

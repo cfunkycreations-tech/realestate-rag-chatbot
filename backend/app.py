@@ -217,7 +217,6 @@ def create_bot(body: BotIn, request: Request):
     name,title,personality=redact(body.name.strip()),redact(body.title.strip()),redact(body.personality)
     with db() as c:
         c.execute('BEGIN IMMEDIATE')
-        if c.execute('SELECT COUNT(*) FROM bots').fetchone()[0] >= 50: raise HTTPException(400, 'You can have up to 50 Bots.')
         id = str(uuid.uuid4())
         c.execute('INSERT INTO bots VALUES (?,?,?,?,?,?,?,?)',(id,name,title,personality,body.color,body.shape,body.profile,time.time()))
         character=draw_character(c,id)
