@@ -156,3 +156,37 @@ def test_historical_missing_cost_requires_audited_owner_confirmation():
         with pytest.raises(BudgetError,match='Only historical'): reconcile_usage(c,usage_id,'0','Again')
         assert c.execute('SELECT note FROM budget_reconciliations WHERE usage_id=?',(usage_id,)).fetchone()['note'] == 'Verified on provider invoice'
     assert reservation('allowed') == 2_000_000
+
+
+def test_followup_model_round_requires_a_settled_previous_round_and_obeys_caps():
+    from funkbot.budget import reserve_followup
+    price()
+    with service.db() as c:
+        c.execute("INSERT INTO bots VALUES ('one','One','Editor','Instructions','mint','round','smart',1)")
+        c.execute("INSERT INTO runs VALUES ('parent','one','running',1,1)")
+        c.execute("INSERT INTO budget_limits VALUES ('account',2100000,NULL)")
+        reserve(c,'parent','one','smart',time.time())
+        with pytest.raises(BudgetError,match='previous model request'): reserve_followup(c,'parent','one','smart',time.time())
+        c.execute("INSERT INTO usage (bot_id,prompt_tokens,completion_tokens,created_at) VALUES ('one',100,0,?)",(time.time(),))
+        usage=c.execute('SELECT id FROM usage').fetchone()['id']
+        assert settle(c,'parent',usage,100,0)==100000
+        followup,amount=reserve_followup(c,'parent','one','smart',time.time())
+        assert amount==2000000 and followup!='parent'
+        assert c.execute('SELECT parent_run_id FROM budget_reservations WHERE run_id=?',(followup,)).fetchone()['parent_run_id']=='parent'
+        with pytest.raises(BudgetError,match='previous model request'): reserve_followup(c,'parent','one','smart',time.time())
+        with pytest.raises(BudgetError,match='no longer active'): reserve_followup(c,'parent','other','smart',time.time())
+
+
+def test_followup_rejects_unbudgeted_runs_different_profile_and_overspend():
+    from funkbot.budget import reserve_followup
+    price()
+    with service.db() as c:
+        c.execute("INSERT INTO bots VALUES ('one','One','Editor','Instructions','mint','round','smart',1)")
+        c.execute("INSERT INTO runs VALUES ('parent','one','running',1,1)")
+        with pytest.raises(BudgetError,match='no prior budget'): reserve_followup(c,'parent','one','smart',time.time())
+        reserve(c,'parent','one','smart',time.time())
+        c.execute("INSERT INTO usage (bot_id,prompt_tokens,completion_tokens,created_at) VALUES ('one',100,0,?)",(time.time(),))
+        usage=c.execute('SELECT id FROM usage').fetchone()['id'];settle(c,'parent',usage,100,0)
+        with pytest.raises(BudgetError,match='original run profile'): reserve_followup(c,'parent','one','fast',time.time())
+        c.execute("INSERT INTO budget_limits VALUES ('account',2000000,NULL)")
+        with pytest.raises(BudgetError,match='daily budget cap'): reserve_followup(c,'parent','one','smart',time.time())

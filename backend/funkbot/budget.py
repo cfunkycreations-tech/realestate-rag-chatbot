@@ -7,6 +7,7 @@ explicit gateway token bound. Prices are configured, never inferred.
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR
 import time
+import uuid
 
 NANOS_PER_DOLLAR = 1_000_000_000
 DEFAULT_DAILY = 5 * NANOS_PER_DOLLAR
@@ -61,7 +62,7 @@ def limits_for(c, scope):
     return (row['daily_nanos'], row['monthly_nanos']) if row else (DEFAULT_DAILY, None)
 
 
-def reserve(c, run_id, bot_id, profile, now, attempts=1):
+def reserve(c, run_id, bot_id, profile, now, attempts=1, parent_run_id=None):
     """Reserve the configured maximum. Caller holds BEGIN IMMEDIATE.
 
     Existing historical usage is included once; missing historical costs or an
@@ -98,8 +99,8 @@ def reserve(c, run_id, bot_id, profile, now, attempts=1):
             if spent + maximum > cap:
                 raise BudgetError(f'{scope} {period} budget cap would be exceeded by the configured reservation for this run.')
     c.execute('''INSERT INTO budget_reservations
-        (run_id,bot_id,profile,created_at,reserved_nanos,prompt_usd_per_million,completion_usd_per_million,max_prompt_tokens,max_completion_tokens,status)
-        VALUES (?,?,?,?,?,?,?,?,?,'reserved')''', (run_id,bot_id,profile,now,maximum,price['prompt_usd_per_million'],price['completion_usd_per_million'],price['max_prompt_tokens'],price['max_completion_tokens']))
+        (run_id,bot_id,profile,created_at,reserved_nanos,prompt_usd_per_million,completion_usd_per_million,max_prompt_tokens,max_completion_tokens,status,parent_run_id)
+        VALUES (?,?,?,?,?,?,?,?,?,'reserved',?)''', (run_id,bot_id,profile,now,maximum,price['prompt_usd_per_million'],price['completion_usd_per_million'],price['max_prompt_tokens'],price['max_completion_tokens'],parent_run_id or run_id))
     return maximum
 
 
@@ -154,3 +155,22 @@ def reconcile_usage(c, usage_id, amount, note, now=None):
     c.execute('INSERT INTO budget_reconciliations (usage_id,cost_nanos,note,created_at) VALUES (?,?,?,?)', (usage_id,cost,clean_note,timestamp))
     c.execute('UPDATE usage SET cost=? WHERE id=?', (cost / NANOS_PER_DOLLAR, usage_id))
     return cost
+
+
+def reserve_followup(c, parent_run_id, bot_id, profile, now, attempts=1):
+    """Reserve a separate model round; caller holds BEGIN IMMEDIATE.
+
+    An earlier unresolved round blocks follow-ups even when the current cap
+    would otherwise allow them. No model request is made by this function.
+    """
+    run=c.execute('SELECT bot_id,status FROM runs WHERE id=?',(parent_run_id,)).fetchone()
+    if not run or run['bot_id'] != bot_id or run['status'] not in ('running','waiting_approval'):
+        raise BudgetError('The Bot run is no longer active.')
+    prior=c.execute('SELECT profile,status FROM budget_reservations WHERE parent_run_id=?', (parent_run_id,)).fetchall()
+    if not prior: raise BudgetError('The run has no prior budget reservation.')
+    if any(row['profile'] != profile for row in prior): raise BudgetError('A follow-up must use the original run profile.')
+    if any(row['status'] in ('reserved','uncertain') for row in prior):
+        raise BudgetError('The previous model request has not been reconciled.')
+    request_id=str(uuid.uuid4())
+    amount=reserve(c,request_id,bot_id,profile,now,attempts=attempts,parent_run_id=parent_run_id)
+    return request_id,amount
