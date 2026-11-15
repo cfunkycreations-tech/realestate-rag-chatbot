@@ -29,7 +29,8 @@
     "test:handoff": "node scripts/handoff-e2e.mjs",
     "test:routines": "node scripts/routines-e2e.mjs",
     "test:chats": "node scripts/chats-e2e.mjs",
-    "test:pwa": "node scripts/pwa-e2e.mjs"
+    "test:pwa": "node scripts/pwa-e2e.mjs",
+    "test:attachments": "node scripts/attachments-e2e.mjs"
   },
   "dependencies": {
     "@tanstack/react-virtual": "^3.14.26",

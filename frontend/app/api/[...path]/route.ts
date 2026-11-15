@@ -12,9 +12,23 @@ async function proxy(request: NextRequest, {params}: {params: Promise<{path: str
     if (value) headers.set(name, value);
   }
   try {
-    const result = await fetch(url, {method: request.method, headers, body: ['GET', 'HEAD'].includes(request.method) ? undefined : await request.arrayBuffer(), redirect: 'manual', cache: 'no-store'});
+    let body: ArrayBuffer | undefined;
+    if (!['GET', 'HEAD'].includes(request.method)) {
+      if (request.method === 'POST' && path.length === 5 && path[0] === 'bots' && path[2] === 'chats' && path[4] === 'attachments' && request.body) {
+        // Bound multipart buffering at the public proxy even without Content-Length.
+        const reader=request.body.getReader(), chunks:Uint8Array[]=[];let total=0;
+        while (true) {
+          const {done,value}=await reader.read();if(done)break;
+          total+=value.byteLength;
+          if(total>2*1024*1024+65536){await reader.cancel();return Response.json({detail:'Attachment request is too large.'},{status:413})}
+          chunks.push(value);
+        }
+        const bytes=new Uint8Array(total);let offset=0;for(const chunk of chunks){bytes.set(chunk,offset);offset+=chunk.byteLength}body=bytes.buffer;
+      } else body=await request.arrayBuffer();
+    }
+    const result = await fetch(url, {method: request.method, headers, body, redirect: 'manual', cache: 'no-store'});
     const outgoing = new Headers();
-    for (const name of ['content-type', 'content-disposition', 'cache-control', 'set-cookie', 'x-accel-buffering', 'x-content-type-options']) {
+    for (const name of ['content-type', 'content-disposition', 'cache-control', 'set-cookie', 'x-accel-buffering', 'x-content-type-options', 'content-security-policy']) {
       const value = result.headers.get(name);
       if (value) outgoing.set(name, value);
     }

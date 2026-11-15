@@ -1,2 +1,5 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# PDF fixtures are binary; preserve their byte offsets.
+*.pdf binary
