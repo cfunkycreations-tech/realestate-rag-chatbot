@@ -40,6 +40,16 @@ npm test
 npm run build
 ```
 
+### Docker smoke check (PowerShell)
+
+With Docker Desktop running, from the repository root run:
+
+```powershell
+.\scripts\docker-smoke.ps1
+```
+
+This builds and starts a separate temporary Compose project, checks `/api/health` through the frontend and verifies the database migration head. It exits nonzero on failure, stops its containers, and deliberately retains its isolated smoke volume. It does not use or remove existing installation volumes and does not test a real model gateway.
+
 ## Character Vault
 
 Open **Settings → Character Vault**, then import a ZIP of PNGs from Sprite Grid Slicer. The importer reads `CharacterName`, `CharacterRole`, `Tags` and `Notes` (and `funk:` equivalents); `CharacterName` or `funk:name` is required. ZIPs are limited to 20 MB, 500 files and 64 MB uncompressed; individual PNGs are limited to 8 MB and 16 megapixels. Invalid files and duplicate names or files are skipped with counts. Names and artwork are not sent to the interface until a character is assigned to a Bot. A new Bot gets a weighted random character without replacement until the draw pool is exhausted; existing Bots and an empty Vault use the built-in shapes. Deleting a Bot returns its character to the available pool if no other Bot has it.
@@ -52,9 +62,9 @@ Character images are stored in the same private data volume as the database; bac
 
 **Gallery** is the home view. It shows assigned characters only; unassigned Vault art stays hidden. Search Bots, switch grid/list/cluster layout, or use the tag-based collection groups in the sidebar. At import, an optional collection tag is added to each newly imported character; duplicates are not modified. An untagged Bot appears in Uncategorized. The gallery paginates 60 Bots at a time and virtualizes visible rows; the sidebar limits its displayed Bot lists to 50, so use search to narrow them. Bot metadata is still fetched in one request, not server-paginated.
 
-Select a Bot to open its spotlight and chat. To remove it, select **Delete Bot** and confirm; its conversation and recorded activity are permanently deleted, while its assigned sprite stays in the Vault. A Bot with a run in progress cannot be deleted until the run ends. Quick Mission sends to the selected Bot through the same chat path. The Activity panel and status indicators come from recorded events. Runs today means `run.started` events since local midnight, not a count of historic runs that predate the event log. Last activity is the latest surviving event. No uptime or mission count is calculated. Upload or remove a private banner under **Settings → Appearance**; otherwise a gradient is shown. The recommended banner size is 2400 × 600. Drag the preview or use the sliders to choose a focal point and zoom, then select **Save placement**. The hero contracts while scrolling and expands again when the content returns to the top.
+Select a Bot to open its spotlight and chat. To remove it, select **Delete Bot** and confirm; its conversation and recorded activity are permanently deleted, while its assigned sprite stays in the Vault. A Bot with a run in progress cannot be deleted until the run ends. Quick Mission creates a real single-Bot mission for the selected Bot. The Activity panel and status indicators come from recorded events. Runs today means `run.started` events since local midnight, not a count of historic runs that predate the event log. Last activity is the latest surviving event. No uptime or mission count is calculated. Upload or remove a private banner under **Settings → Appearance**; otherwise a gradient is shown. The recommended banner size is 2400 × 600. Drag the preview or use the sliders to choose a focal point and zoom, then select **Save placement**. The hero contracts while scrolling and expands again when the content returns to the top.
 
-**Office** renders assigned sprites at desks, falling back to built-in shapes, with real recorded activity. It makes no model calls and displays 50 Bots per page. The earlier scripted demo is not exposed in this view because the Command Center is restricted to real Bots and recorded activity. Group chats and real meeting events are not implemented. The live feed starts with events recorded after the event-log upgrade. On a phone, swipe the canvas horizontally to explore; use the Bot buttons below it for a keyboard-accessible way to open a chat.
+**Office** renders assigned sprites at desks, falling back to built-in shapes, with real recorded activity. It makes no model calls and displays 50 Bots per page. The earlier scripted demo is not exposed in this view because the Command Center is restricted to real Bots and recorded activity. Chief-led group missions emit real meeting, delegation and reply events; their Bots gather in the meeting room while the group mission is active. The live feed starts with events recorded after the event-log upgrade. On a phone, swipe the canvas horizontally to explore; use the Bot buttons below it for a keyboard-accessible way to open a chat.
 
 ### Browser screenshots
 
@@ -168,6 +178,10 @@ npm run test:missions
 
 This creates missions and a note, adjusts the budget, and must not be run against a real installation. The gateway address must be reachable from the backend.
 
+### Lab and Analytics browser check
+
+Run `node scripts/mock-lab-gateway.mjs` from `frontend` and use a fresh disposable installation. Set `E2E_URL`, `E2E_SETUP_TOKEN`, and `E2E_GATEWAY_URL` (for example `http://127.0.0.1:8032/v1`, reachable by the backend), then run `npm run test:lab`. This changes disposable data; do not run against a real installation.
+
 ### Group browser check
 
 For a fresh disposable installation, run `node scripts/mock-group-gateway.mjs` from `frontend`, then set `E2E_URL`, `E2E_SETUP_TOKEN`, and `E2E_GATEWAY_URL` (for example `http://127.0.0.1:8031/v1`, reachable from the backend) and run `npm run test:groups`. This test creates Bots, a group and a mission, approves a workspace note, and must not target real data.
@@ -175,6 +189,14 @@ For a fresh disposable installation, run `node scripts/mock-group-gateway.mjs` f
 ### Project browser check
 
 With the mock gateway running and a separate fresh disposable installation, set the same `E2E_URL`, `E2E_GATEWAY_URL` and `E2E_SETUP_TOKEN` variables as for the mission browser check and run `npm run test:projects` from `frontend`. This creates a mission, approves a note, and changes project data; do not run it against a real installation.
+
+### Analytics, Lab and memory
+
+Analytics groups real runs and model rounds by their UTC start date, and approval decisions by decision date. Latency includes time waiting for approvals; the error rate counts failed runs among terminal runs (including cancellations). Costs are ledger estimates based on configured prices, not provider invoices. Pending or uncertain charges are counted separately and excluded from spend. Older usage without a linked reservation is shown under an unknown profile. CSV contains the same rows.
+
+Lab compares up to three configured profiles sequentially. Each call reserves budget and is counted in the ledger. It sends the tested prompt without Bot conversation history, memory or tools, and rejects unexpected tool calls. Lab runs do not add chat messages or write workspace files. A completed test can explicitly replace the Bot personality or save its results as a project note. A restart marks unfinished tests failed. It cannot prevent a model provider from storing a request; check that provider's policies.
+
+Per-Bot memory is managed in Lab. Entries can be edited, deleted and pinned, with a maximum of 50 entries, 4,000 characters per entry and 32,000 characters per Bot. Normal runs include up to 8,000 characters, pinned then most recent; the memory is described to the model as untrusted data. Known gateway keys and common secret patterns are redacted before storage, but redaction is not guaranteed: never put sensitive information in memory. Deleting a Bot deletes its memory.
 
 ## Current behavior and limitations
 

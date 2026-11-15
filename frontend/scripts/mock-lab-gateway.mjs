@@ -1,0 +1,4 @@
+// Disposable gateway for isolated Lab browser checks.
+import http from 'node:http';
+const port=Number(process.env.MOCK_PORT||8032);
+http.createServer(async(req,res)=>{if(req.method!=='POST'||req.url!=='/v1/chat/completions'){res.writeHead(404).end();return}let raw='';for await(const part of req)raw+=part;const payload=JSON.parse(raw);if(payload.tools||payload.messages.length!==2){res.writeHead(400).end();return}const chunks=[{choices:[{delta:{content:`Fixture ${payload.model} response.`},finish_reason:'stop'}]},{choices:[],usage:{prompt_tokens:120,completion_tokens:30}}];res.writeHead(200,{'Content-Type':'text/event-stream'});for(const chunk of chunks)res.write('data: '+JSON.stringify(chunk)+'\n\n');res.end('data: [DONE]\n\n')}).listen(port,'0.0.0.0',()=>console.log(`Disposable Lab gateway listening on ${port}`));

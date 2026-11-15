@@ -1,0 +1,16 @@
+# Dedicated disposable project; never references the normal installation volumes.
+services:
+  backend:
+    build: ../backend
+    volumes:
+      - smoke_data:/data
+  frontend:
+    build: ../frontend
+    environment:
+      BACKEND_URL: http://backend:8000
+    ports:
+      - "127.0.0.1::3000"
+    depends_on:
+      - backend
+volumes:
+  smoke_data:
