@@ -1,5 +1,7 @@
 """Funk Bot: local-first, single-user chat service."""
 import asyncio
+import csv
+from datetime import date, datetime, timedelta, timezone
 import io
 import warnings
 import json
@@ -1355,6 +1357,65 @@ async def stop_job(job_id: str, request: Request):
         job['user_cancelled'] = True
         job['task'].cancel()
     return {'ok':True}
+
+def analytics_report(start: str, end: str):
+    try:
+        first=date.fromisoformat(start);last=date.fromisoformat(end)
+        if last<first or (last-first).days>365 or last==date.max: raise ValueError()
+    except ValueError: raise HTTPException(400,'Choose a valid UTC date range of at most 366 days.')
+    lower=datetime.combine(first,datetime.min.time(),tzinfo=timezone.utc).timestamp()
+    upper=datetime.combine(last+timedelta(days=1),datetime.min.time(),tzinfo=timezone.utc).timestamp()
+    rows={}
+    def bucket(timestamp,bot_id,profile):
+        day=datetime.fromtimestamp(timestamp,timezone.utc).date().isoformat();key=(day,bot_id or '',profile or 'unknown')
+        if key not in rows: rows[key]={'day':day,'bot_id':bot_id,'profile':profile or 'unknown','runs':0,'failed':0,'completed':0,'latency_sum_ms':0.0,'prompt_tokens':0,'completion_tokens':0,'cost_nanos':0,'unverified':0,'approvals':0,'denials':0}
+        return rows[key]
+    with db() as c:
+        names={r['id']:r['name'] for r in c.execute('SELECT id,name FROM bots')}
+        runs=c.execute('''SELECT runs.*,budget_reservations.profile FROM runs LEFT JOIN budget_reservations ON budget_reservations.run_id=runs.id WHERE runs.created_at>=? AND runs.created_at<?''',(lower,upper)).fetchall()
+        for r in runs:
+            b=bucket(r['created_at'],r['bot_id'],r['profile']);b['runs']+=1
+            if r['status'] in ('done','failed','cancelled'):
+                b['completed']+=1;b['latency_sum_ms']+=max(0,r['updated_at']-r['created_at'])*1000
+                if r['status']=='failed':b['failed']+=1
+        reservations=c.execute('''SELECT budget_reservations.*,usage.prompt_tokens,usage.completion_tokens FROM budget_reservations LEFT JOIN usage ON usage.id=budget_reservations.usage_id WHERE budget_reservations.created_at>=? AND budget_reservations.created_at<?''',(lower,upper)).fetchall()
+        for r in reservations:
+            b=bucket(r['created_at'],r['bot_id'],r['profile']);b['prompt_tokens']+=r['prompt_tokens'] or 0;b['completion_tokens']+=r['completion_tokens'] or 0
+            if r['status']=='settled':b['cost_nanos']+=r['actual_nanos'] or 0
+            elif r['status'] in ('uncertain','reserved'):b['unverified']+=1
+        legacy=c.execute('''SELECT * FROM usage WHERE created_at>=? AND created_at<? AND NOT EXISTS (SELECT 1 FROM budget_reservations WHERE budget_reservations.usage_id=usage.id)''',(lower,upper)).fetchall()
+        for r in legacy:
+            b=bucket(r['created_at'],r['bot_id'],'unknown');b['prompt_tokens']+=r['prompt_tokens'] or 0;b['completion_tokens']+=r['completion_tokens'] or 0
+            if r['cost'] is None:b['unverified']+=1
+            else:b['cost_nanos']+=dollars_to_nanos(r['cost'])
+        decisions=c.execute('''SELECT tool_audit.created_at,tool_audit.action,tool_calls.bot_id,budget_reservations.profile FROM tool_audit JOIN tool_calls ON tool_calls.id=tool_audit.call_id LEFT JOIN budget_reservations ON budget_reservations.run_id=tool_calls.run_id WHERE tool_audit.created_at>=? AND tool_audit.created_at<? AND tool_audit.action IN ('approve','approve_once','deny')''',(lower,upper)).fetchall()
+        for r in decisions:
+            b=bucket(r['created_at'],r['bot_id'],r['profile']);b['denials' if r['action']=='deny' else 'approvals']+=1
+    result=[]
+    for b in sorted(rows.values(),key=lambda r:(r['day'],r['bot_id'] or '',r['profile'])):
+        b['bot_name']=names.get(b['bot_id'],'Deleted or unknown Bot');b['cost_usd']=b.pop('cost_nanos')/NANOS_PER_DOLLAR
+        b['average_latency_ms']=round(b.pop('latency_sum_ms')/b['completed'],2) if b['completed'] else None
+        b['error_rate']=b['failed']/b['completed'] if b['completed'] else None
+        result.append(b)
+    return result
+
+
+@app.get('/api/analytics')
+def get_analytics(request: Request, start: str, end: str):
+    require_auth(request)
+    return {'start':start,'end':end,'rows':analytics_report(start,end)}
+
+
+@app.get('/api/analytics.csv')
+def export_analytics(request: Request, start: str, end: str):
+    require_auth(request);rows=analytics_report(start,end)
+    fields=['day','bot_id','bot_name','profile','runs','completed','failed','average_latency_ms','error_rate','prompt_tokens','completion_tokens','cost_usd','unverified','approvals','denials']
+    stream=io.StringIO(newline='');writer=csv.DictWriter(stream,fieldnames=fields,extrasaction='ignore');writer.writeheader()
+    for row in rows:
+        safe={key:("'"+value if isinstance(value,str) and value.lstrip().startswith(('=','+','-','@','\t','\r')) else value) for key,value in row.items()}
+        writer.writerow(safe)
+    return Response(stream.getvalue(),media_type='text/csv',headers={'Content-Disposition':'attachment; filename="funk-bot-analytics.csv"'})
+
 
 @app.get('/api/events', response_model=EventPage)
 def account_events(request: Request, since: int = Query(default=0, ge=0), limit: int = Query(default=100, ge=1, le=500)):
