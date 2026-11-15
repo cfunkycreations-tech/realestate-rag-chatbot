@@ -23,7 +23,8 @@
     "test:memory-layers": "node scripts/memory-layers-e2e.mjs",
     "test:duplicate": "node scripts/duplicate-e2e.mjs",
     "test:event-export": "node scripts/event-export-e2e.mjs",
-    "test:skills": "node scripts/skills-e2e.mjs"
+    "test:skills": "node scripts/skills-e2e.mjs",
+    "test:pause": "node scripts/pause-e2e.mjs"
   },
   "dependencies": {
     "@tanstack/react-virtual": "^3.14.26",

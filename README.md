@@ -217,6 +217,10 @@ Open **Settings → Budget** to set caps and profile prices. The account and eac
 - The authenticated `/api/events?since=0` endpoint exposes cursor-ordered run starts, message summaries, state changes, errors, and finishes recorded after this upgrade. Existing slice-2 events remain in per-run history and are not backfilled. Deleting a Bot deletes its event history. This is not a complete audit log. Beyond the two tools described above, no general search or file access, MCP, scheduler, webhook, sandbox, notifications, PWA, workspace backup, or browser/computer features are provided. The UI intentionally does not advertise those as working.
 - Provider names and defaults are configuration examples, not a guarantee that models are currently available. A working account/key and gateway configuration are required for live inference.
 
+### Global pause
+
+**Pause all Bots** blocks new chat, mission and Lab starts, stops active responses and pending tool approvals, and cancels queued missions and Lab work. The paused state survives a backend restart; resuming does not replay stopped work. An action already completed cannot be undone, and an in-flight provider request can have an uncertain charge. This control covers the current single-worker runtime, not a computer sandbox or future connectors, which are not built.
+
 ### Skills
 
 Use **Skills** to create, edit or delete up to 50 account-wide guides. Each has a slash command, when-to-use description, inputs, steps and checks. Type `/` in a Bot chat to select a skill, then add the request and send. A finished mission can open an unsaved skill draft containing its title and up to 6,000 characters of its instructions; review the draft and fill the missing fields before saving.

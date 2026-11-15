@@ -126,3 +126,5 @@
 
 .skill-suggestions{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px}.skill-suggestions button{background:#281436;color:#f6e4ff;border:1px solid #805d39;border-radius:7px;padding:7px 10px;font-size:12px}.skills-view .mission-detail form{display:flex;flex-direction:column;gap:7px}.skills-view .mission-detail form button{align-self:flex-start}.skills-view .project-row p{margin:5px 0;overflow-wrap:anywhere}
 .skills-view input[type=file]{width:100%;min-width:0;box-sizing:border-box}
+
+.global-pause{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:6px 14px;background:#180d20;border-bottom:1px solid #805824;color:#eee2f4;font-size:12px;flex-shrink:0}.global-pause button{border:1px solid #ed8290;border-radius:7px;background:#4d1b30;color:#fff;padding:7px 12px;font-weight:700;white-space:nowrap}.global-pause button:disabled{opacity:.6}@media(max-width:700px){.global-pause{font-size:10px;padding:5px 8px}.global-pause button{font-size:11px;padding:7px 9px}}

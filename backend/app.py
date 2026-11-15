@@ -124,6 +124,45 @@ jobs = {}
 mission_tasks = {}
 lab_tasks = {}
 
+
+def require_unpaused(c):
+    row=c.execute("SELECT value FROM config WHERE key='global_pause'").fetchone()
+    if row and row['value']=='1': raise HTTPException(423,'All Bots are paused. Resume them before starting new work.')
+
+
+class PauseIn(BaseModel):
+    paused: bool = Field(strict=True)
+
+
+@app.get('/api/control/pause')
+def get_global_pause(request: Request):
+    require_auth(request)
+    return {'paused':config('global_pause','0')=='1'}
+
+
+@app.put('/api/control/pause')
+async def put_global_pause(body: PauseIn, request: Request):
+    require_auth(request)
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        c.execute('INSERT OR REPLACE INTO config VALUES (?,?)',('global_pause','1' if body.paused else '0'))
+        if body.paused:
+            now=time.time()
+            c.execute("UPDATE missions SET status='cancelled',error='Cancelled by global pause.',updated_at=? WHERE status='queued'",(now,))
+            c.execute("UPDATE lab_experiments SET status='failed',error='Stopped by global pause.',updated_at=? WHERE status='queued'",(now,))
+            c.execute("UPDATE lab_runs SET status='failed',error='Stopped by global pause.',updated_at=? WHERE status='queued'",(now,))
+    if body.paused:
+        # Single-worker runtime: cancel current tasks after atomically blocking
+        # new starts. Already completed external actions cannot be reversed.
+        tasks=set()
+        for job in list(jobs.values()):
+            if not job['done'] and job.get('task'):
+                job['user_cancelled']=True;job['task'].cancel();tasks.add(job['task'])
+        for task in [*mission_tasks.values(),*lab_tasks.values()]:
+            if not task.done(): task.cancel();tasks.add(task)
+        if tasks: await asyncio.gather(*tasks,return_exceptions=True)
+    return {'paused':body.paused}
+
 class Password(BaseModel):
     password: str = Field(min_length=8, max_length=256)
 
@@ -760,6 +799,7 @@ async def start_chat(bot_id: str, body: ChatIn, mission_id: str | None = None, g
     job_id = str(uuid.uuid4())
     with db() as c:
         c.execute('BEGIN IMMEDIATE')
+        require_unpaused(c)
         row=c.execute('SELECT * FROM bots WHERE id=?',(bot_id,)).fetchone()
         if not row: raise HTTPException(404,'Bot not found.')
         if mission_id and not c.execute("SELECT 1 FROM missions JOIN mission_assignees ON mission_assignees.mission_id=missions.id WHERE missions.id=? AND missions.status IN ('queued','running') AND mission_assignees.bot_id=? AND (?=1 OR missions.status='queued')",(mission_id,bot_id,int(group_managed))).fetchone():
@@ -1000,6 +1040,7 @@ async def create_mission(body: MissionIn, request: Request):
     mission_id=str(uuid.uuid4());now=time.time()
     with db() as c:
         c.execute('BEGIN IMMEDIATE')
+        require_unpaused(c)
         if bool(body.bot_id)==bool(body.group_id): raise HTTPException(400,'Choose either one Bot or one group.')
         if body.group_id:
             group=c.execute('SELECT * FROM bot_groups WHERE id=?',(body.group_id,)).fetchone()
@@ -1109,6 +1150,7 @@ async def create_lab(body: LabIn, request: Request):
     now=time.time();eid=str(uuid.uuid4())
     with db() as c:
         c.execute('BEGIN IMMEDIATE')
+        require_unpaused(c)
         if not c.execute('SELECT 1 FROM bots WHERE id=?',(body.bot_id,)).fetchone(): raise HTTPException(404,'Bot not found.')
         c.execute('INSERT INTO lab_experiments VALUES (?,?,?,?,?,?,?,?)',(eid,body.bot_id,prompt,system_prompt,'queued',None,now,now))
         for pos,profile in enumerate(body.profiles): c.execute('INSERT INTO lab_runs VALUES (?,?,?,?,?,?,?,?,?,?)',(str(uuid.uuid4()),eid,pos,profile,None,'queued',None,None,now,now))
@@ -1669,6 +1711,7 @@ def job_tool_calls(job_id: str, request: Request):
 async def decide_tool_call(job_id: str, call_id: str, body: ToolDecisionIn, request: Request):
     require_auth(request)
     with db() as c:
+        require_unpaused(c)
         row=c.execute('SELECT tool_calls.status, runs.status AS run_status FROM tool_calls JOIN runs ON runs.id=tool_calls.run_id WHERE tool_calls.id=? AND tool_calls.run_id=?',(call_id,job_id)).fetchone()
     if not row: raise HTTPException(404,'Tool call not found.')
     bridge=jobs.get(job_id,{}).get('tool_bridge')
