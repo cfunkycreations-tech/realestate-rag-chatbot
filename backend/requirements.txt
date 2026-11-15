@@ -9,3 +9,5 @@ SQLAlchemy==2.0.41
 alembic==1.15.2
 Pillow==13.0.0
 python-multipart==0.0.33
+
+h11==0.16.0
