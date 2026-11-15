@@ -29,6 +29,7 @@ from funkbot.auth_security import ensure_setup_token, lockout_seconds
 from funkbot.redaction import SlidingRedactor, redact_text
 from funkbot.vault import MAX_ARCHIVE, VaultError, character_for_bot, draw_character, import_zip
 from funkbot.budget import BudgetError, NANOS_PER_DOLLAR, dollars_to_nanos, limit_to_nanos, limits_for, reconcile_run, reconcile_usage, reserve, settle, token_cost_nanos
+from funkbot.tool_policy import WebPolicy
 
 DATA = Path(os.environ.get('FUNK_DATA_DIR', Path(__file__).parent.parent / 'data'))
 DATA.mkdir(parents=True, exist_ok=True)
@@ -449,6 +450,19 @@ def reconcile_budget(kind: str, identifier: str, body: BudgetCorrectionIn, reque
             else: raise HTTPException(400, 'Invalid correction target.')
     except BudgetError as exc: raise HTTPException(400, str(exc)) from exc
     return {'ok': True}
+
+
+@app.get('/api/settings/web-policy')
+def get_web_policy(request: Request):
+    require_auth(request)
+    return WebPolicy.model_validate_json(config('web_policy', '{}')).model_dump()
+
+
+@app.put('/api/settings/web-policy')
+def save_web_policy(body: WebPolicy, request: Request):
+    require_auth(request)
+    set_config('web_policy',body.model_dump_json())
+    return body.model_dump()
 
 
 class ChatIn(BaseModel):
