@@ -1,6 +1,6 @@
 # Runs only an isolated disposable Compose project. Never removes volumes.
 $ErrorActionPreference = 'Stop'
-$project = "funkbot-smoke-$PID"
+$project = "funkbot-smoke-$([guid]::NewGuid().ToString('N').Substring(0,12))"
 $composeFile = Join-Path $PSScriptRoot 'smoke-compose.yml'
 $started = $false
 $failed = $false
@@ -12,7 +12,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'The isolated smoke stack failed to build or start.' }
     $binding = docker compose -p $project -f $composeFile port frontend 3000
     if ($LASTEXITCODE -ne 0 -or "$binding" -notmatch ':(\d+)\s*$') { throw 'Could not determine the frontend smoke port.' }
-    $port = $Matches[1]
+    $port = [regex]::Match("$binding", ":(\d+)\s*$").Groups[1].Value
     $healthy = $false
     for ($i = 0; $i -lt 90; $i++) {
         try {
