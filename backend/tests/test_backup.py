@@ -29,6 +29,8 @@ def test_backup_restore_roundtrip_is_staged_and_preserves_current_installation()
         bot=c.post('/api/bots',json={'name':'Original'}).json()['id']
         assert c.put('/api/settings/gateways/openrouter',json={'url':'https://example.com/v1','key':'private-key-abcdefgh12345'}).status_code==200
         assert c.put('/api/connectors/new',json={'name':'MCP','url':'https://example.com/mcp','key':'connector-token-abcdefgh','enabled':True,'allowed_tools':['read']}).status_code==200
+        workflow=c.post('/api/workflows',json={'name':'Reusable','bot_id':bot,'steps':['Original']}).json()['id']
+        assert c.put(f'/api/workflows/{workflow}',json={'name':'Reusable','bot_id':bot,'steps':['Corrected'],'expected_version':1}).status_code==200
         workspace=service.DATA/'workspaces'/bot;workspace.mkdir(parents=True);(workspace/'note.txt').write_text('precious note')
         (service.DATA/'vault').mkdir();(service.DATA/'vault'/'sprite.png').write_bytes(b'sprite')
         (service.DATA/'banner.png').write_bytes(b'banner')
@@ -46,6 +48,7 @@ def test_backup_restore_roundtrip_is_staged_and_preserves_current_installation()
         assert (stage/'workspaces'/bot/'note.txt').read_text()=='precious note'
         with sqlite3.connect(stage/'funk.db') as db:
             assert db.execute('select name from bots').fetchall()==[('Original',)]
+            assert db.execute('select version,steps from workflow_versions order by version').fetchall()==[(1,'["Original"]'),(2,'["Corrected"]')]
             gateways=json.loads(db.execute("select value from config where key='gateways'").fetchone()[0])
             assert Fernet((stage/'vault.key').read_bytes()).decrypt(gateways['openrouter']['key'].encode())==b'private-key-abcdefgh12345'
             connectors=json.loads(db.execute("select value from config where key='mcp_connectors'").fetchone()[0])
@@ -125,6 +128,6 @@ def test_restore_upgrades_older_snapshot_only_in_isolated_stage(tmp_path):
         r=c.post('/api/workspace/restore',content=out.getvalue(),headers={'content-type':'application/zip'});assert r.status_code==200,r.text
         stage=service.DATA/'restores'/r.json()['staged_id']
         with sqlite3.connect(stage/'funk.db') as db:
-            assert db.execute('SELECT version_num FROM alembic_version').fetchone()[0]=='0021_work_artifacts'
+            assert db.execute('SELECT version_num FROM alembic_version').fetchone()[0]=='0022_workflows'
             assert db.execute('SELECT name FROM bots').fetchone()[0]=='Preserved'
         with sqlite3.connect(old/'funk.db') as db: assert db.execute('SELECT version_num FROM alembic_version').fetchone()[0]=='0019_attachments'
