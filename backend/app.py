@@ -1166,7 +1166,7 @@ def create_memory(bot_id: str, body: MemoryIn, request: Request):
         if not c.execute('SELECT 1 FROM bots WHERE id=?',(bot_id,)).fetchone(): raise HTTPException(404,'Bot not found.')
         size=c.execute('SELECT COUNT(*) AS count,COALESCE(SUM(LENGTH(content)),0) AS size FROM bot_memories WHERE bot_id=?',(bot_id,)).fetchone()
         if size['count']>=50 or size['size']+len(content)>32000: raise HTTPException(400,'Memory limit reached (50 entries or 32,000 characters).')
-        c.execute('INSERT INTO bot_memories VALUES (?,?,?,?,?,?)',(memory_id,bot_id,content,int(body.pinned),now,now))
+        c.execute('INSERT INTO bot_memories (id,bot_id,content,pinned,created_at,updated_at) VALUES (?,?,?,?,?,?)',(memory_id,bot_id,content,int(body.pinned),now,now))
     return {'id':memory_id}
 
 
