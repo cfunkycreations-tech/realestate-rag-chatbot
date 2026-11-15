@@ -50,3 +50,14 @@ def test_concurrent_claim_only_one_can_execute():
             except ToolError: return False
     with ThreadPoolExecutor(max_workers=2) as pool:
         assert sorted(pool.map(attempt,range(2))) == [False,True]
+
+
+@pytest.mark.parametrize('risk,decision',[('send','deny'),('spend','approve_once')])
+def test_future_send_and_spend_categories_require_approval(monkeypatch,risk,decision):
+    from funkbot.tools import REGISTRY,ToolSpec,NotesArgs
+    monkeypatch.setitem(REGISTRY,'test_'+risk,ToolSpec('test_'+risk,risk,NotesArgs,'Test only; not executable.'))
+    with service.db() as c:
+        call=propose(c,'r','b','test_'+risk,{'filename':'file.txt','content':'hello'},lambda x:x)
+        assert c.execute('SELECT status FROM tool_calls WHERE id=?',(call,)).fetchone()['status']=='pending'
+        with pytest.raises(ToolError): claim(c,call)
+        assert decide(c,call,decision)==('denied' if decision=='deny' else 'approved')

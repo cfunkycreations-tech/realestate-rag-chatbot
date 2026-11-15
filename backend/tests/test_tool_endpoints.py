@@ -49,3 +49,23 @@ def test_stale_pending_approval_cannot_execute_without_live_broker(tmp_path):
         with service.db() as db: call=propose(db,ctx.run_id,ctx.bot_id,'write_note',{'filename':'x.txt','content':'x'},lambda x:x)
         assert client.post(f'/api/jobs/{ctx.run_id}/tool-calls/{call}/decision',json={'decision':'approve'}).status_code==409
         assert not (tmp_path/'workspaces').exists()
+
+
+def test_account_audit_pages_and_bot_delete_removes_its_recorded_activity(tmp_path):
+    from funkbot.tool_audit import propose
+    with TestClient(service.app) as client:
+        assert client.get('/api/tool-audit').status_code==401
+        setup(client);ctx,_=make_context(tmp_path)
+        with service.db() as db:
+            db.execute("UPDATE runs SET status='done' WHERE id=?",(ctx.run_id,))
+            for n in range(23): propose(db,ctx.run_id,ctx.bot_id,'write_note',{'filename':f'{n}.txt','content':'safe'},lambda x:x)
+        first=client.get('/api/tool-audit').json()
+        assert len(first['calls'])==20 and first['next_before']
+        second=client.get('/api/tool-audit',params={'before':first['next_before']}).json()
+        assert len(second['calls'])==3 and second['next_before'] is None
+        assert len({call['id'] for call in first['calls']+second['calls']})==23
+        assert first['calls'][0]['audit'][0]['action']=='proposed'
+        assert client.delete(f'/api/bots/{ctx.bot_id}').status_code==200
+        assert client.get('/api/tool-audit').json()['calls']==[]
+        with service.db() as db:
+            assert db.execute('SELECT COUNT(*) FROM tool_audit').fetchone()[0]==0

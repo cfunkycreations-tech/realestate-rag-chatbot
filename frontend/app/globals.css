@@ -100,3 +100,16 @@
 @media(max-width:500px){.budget-fields{grid-template-columns:1fr}}
 .delete-bot{display:inline-flex;align-items:center;justify-content:center;gap:6px;border-color:#ad5d69;color:#ffd1d5}.delete-bot:hover:not(:disabled){background:#54242f;border-color:#ff9ba7;color:#fff}.delete-bot:disabled{opacity:.5;cursor:not-allowed}.spotlight-chat .header-delete{display:none}
 @media(max-width:700px){.header-delete{font-size:10px;padding:7px}.header-right{gap:5px}.chat-header{padding:0 12px}}
+
+/* Tool proposals show the exact redacted arguments that will be executed. */
+.tool-activity{margin:20px 0 28px 48px;min-width:0;display:grid;gap:10px}
+.tool-activity-heading{display:flex;justify-content:space-between;gap:12px;align-items:baseline;color:#f0e9f5;font-size:13px}
+.tool-activity-heading span,.tool-card-head span{color:#c2b3ca;font-size:11px}
+.tool-card{border:1px solid #664172;border-radius:14px;background:#21172c;color:#f4eaf6;padding:16px;min-width:0;box-shadow:0 4px 16px rgba(42,34,71,.04)}
+.tool-card-pending{border-color:#d1ad69;background:#2a1b34}
+.tool-card-head{display:flex;justify-content:space-between;align-items:flex-start;gap:12px}.tool-card-head>div{display:grid;gap:3px}.tool-card-head strong{font-size:14px}.tool-card-head .tool-status{color:#f3d594;font-weight:700;white-space:nowrap;text-transform:capitalize}
+.tool-card dl{margin:14px 0}.tool-card dl>div+div{margin-top:10px}.tool-card dt{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:#c9b7d3;font-weight:700}.tool-card dd{margin:4px 0 0}.tool-card pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;background:#140e1c;border-radius:8px;padding:10px;max-height:240px;overflow:auto;font-size:12px;line-height:1.5;color:#f3edf7;margin:0}.tool-help{font-size:12px;line-height:1.5;color:#d0bfda;margin:10px 0}.tool-actions{display:flex;flex-wrap:wrap;gap:8px}.tool-actions button{font-size:12px}.tool-card details{margin-top:12px;font-size:12px;color:#d3c1d9}.tool-card summary{cursor:pointer;font-weight:700;margin-bottom:8px}.tool-card table{width:100%;border-collapse:collapse;text-align:left}.tool-card th,.tool-card td{padding:6px;border-bottom:1px solid #59405e;vertical-align:top}.tool-card th{font-size:11px;color:#c2b3ca}.web-policy form textarea{width:100%;resize:vertical}.web-policy form button{margin-top:12px}
+@media(max-width:600px){.tool-activity{margin-left:0}.tool-card{padding:13px}.tool-card-head{flex-wrap:wrap}.tool-activity-heading{flex-wrap:wrap}.tool-actions button{flex:1 1 auto}}
+
+@media(max-width:700px){.spotlight-panel.reviewing .spotlight-activity{display:none}}
+.audit-table-wrap{overflow:auto;max-width:100%;border:1px solid #403044;border-radius:10px}.audit-table{width:100%;border-collapse:collapse;min-width:590px;font-size:12px;text-align:left}.audit-table th,.audit-table td{padding:10px;border-bottom:1px solid #403044;vertical-align:top}.audit-table th{font-size:10px;text-transform:uppercase;letter-spacing:.05em;color:#c5b2ca}.audit-table td small{display:block;color:#c5b2ca}.audit-table details{min-width:80px}.audit-table summary{cursor:pointer}.audit-table pre{white-space:pre-wrap;word-break:break-word;max-width:320px;max-height:160px;overflow:auto;background:#120d1a;padding:8px;border-radius:6px}.audit-settings>button{margin-top:12px}

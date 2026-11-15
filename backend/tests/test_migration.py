@@ -37,7 +37,7 @@ def test_slice2_database_migrates_without_data_loss(tmp_path, monkeypatch):
         assert c.execute('SELECT status FROM runs WHERE id=?',('r',)).fetchone()['status'] == 'done'
         assert c.execute('SELECT event_type FROM run_events WHERE run_id=?',('r',)).fetchone()['event_type'] == 'done'
         assert c.execute('SELECT completion_tokens FROM usage').fetchone()['completion_tokens'] == 7
-        assert c.execute('SELECT version_num FROM alembic_version').fetchone()[0] == '0008_budget_rounds'
+        assert c.execute('SELECT version_num FROM alembic_version').fetchone()[0] == '0009_tool_risks'
     assert json.loads(service.config('gateways'))['openrouter']['key'] == encrypted
     assert service.gateway_config('openrouter')[1]['Authorization'] == 'Bearer ' + secret
 
@@ -65,7 +65,7 @@ def test_budget_migration_from_previous_schema_preserves_existing_data(tmp_path)
     migrate(path)
     migrate(path)
     with engine.connect() as connection:
-        assert connection.exec_driver_sql('SELECT version_num FROM alembic_version').scalar() == '0008_budget_rounds'
+        assert connection.exec_driver_sql('SELECT version_num FROM alembic_version').scalar() == '0009_tool_risks'
         assert connection.exec_driver_sql("SELECT value FROM config WHERE key='gateways'").scalar() == 'encrypted-existing-value'
         assert connection.exec_driver_sql("SELECT name FROM bots WHERE id='b'").scalar() == 'Original'
         assert connection.exec_driver_sql("SELECT character_id FROM bot_characters WHERE bot_id='b'").scalar() == 'c'
@@ -92,7 +92,7 @@ def test_budget_reconciliation_migration_from_previous_schema(tmp_path):
         c.commit()
     migrate(path)
     with engine.connect() as c:
-        assert c.exec_driver_sql('SELECT version_num FROM alembic_version').scalar() == '0008_budget_rounds'
+        assert c.exec_driver_sql('SELECT version_num FROM alembic_version').scalar() == '0009_tool_risks'
         assert c.exec_driver_sql("SELECT daily_nanos FROM budget_limits WHERE scope='account'").scalar() == 123456789
         assert c.exec_driver_sql("SELECT prompt_usd_per_million FROM budget_prices WHERE profile='smart'").scalar() == '1.2'
         assert c.exec_driver_sql("SELECT status FROM budget_reservations WHERE run_id='run'").scalar() == 'uncertain'
@@ -120,7 +120,7 @@ def test_tool_audit_migration_from_previous_schema(tmp_path):
         c.commit()
     migrate(path)
     with engine.connect() as c:
-        assert c.exec_driver_sql('SELECT version_num FROM alembic_version').scalar() == '0008_budget_rounds'
+        assert c.exec_driver_sql('SELECT version_num FROM alembic_version').scalar() == '0009_tool_risks'
         assert c.exec_driver_sql("SELECT value FROM config WHERE key='gateways'").scalar() == 'existing-encrypted-gateways'
         assert c.exec_driver_sql("SELECT name FROM bots WHERE id='b'").scalar() == 'Kept'
         assert c.exec_driver_sql("SELECT character_id FROM bot_characters WHERE bot_id='b'").scalar() == 'c'
@@ -144,8 +144,36 @@ def test_budget_round_migration_from_previous_schema(tmp_path):
         c.commit()
     migrate(path)
     with engine.connect() as c:
-        assert c.exec_driver_sql('SELECT version_num FROM alembic_version').scalar()=='0008_budget_rounds'
+        assert c.exec_driver_sql('SELECT version_num FROM alembic_version').scalar()=='0009_tool_risks'
         assert c.exec_driver_sql("SELECT parent_run_id FROM budget_reservations WHERE run_id='r'").scalar()=='r'
         assert c.exec_driver_sql("SELECT status FROM budget_reservations WHERE run_id='r'").scalar()=='uncertain'
         assert c.exec_driver_sql("SELECT status FROM tool_calls WHERE id='call'").scalar()=='pending'
         assert c.exec_driver_sql("SELECT action FROM tool_audit WHERE call_id='call'").scalar()=='proposed'
+
+
+def test_tool_risk_migration_from_previous_schema_preserves_history(tmp_path):
+    from alembic import command
+    from alembic.config import Config
+    from funkbot.database import engine_for, migrate
+    from pathlib import Path
+    path=tmp_path/'before-risk-categories.db';engine=engine_for(str(path))
+    with engine.connect() as c:
+        cfg=Config();cfg.set_main_option('script_location',str(Path(service.__file__).parent/'funkbot'/'migrations'));cfg.attributes['connection']=c
+        command.upgrade(cfg,'0008_budget_rounds');c.commit()
+        c.exec_driver_sql("INSERT INTO bots VALUES ('b','Original','Editor','instructions','mint','round','smart',1)")
+        c.exec_driver_sql("INSERT INTO characters VALUES ('c','hash','Sprite','sprite','role','[]','note','common',1,1)")
+        c.exec_driver_sql("INSERT INTO bot_characters VALUES ('b','c',1)")
+        c.exec_driver_sql("INSERT INTO config VALUES ('gateways','saved-encrypted-gateway')")
+        c.exec_driver_sql("INSERT INTO tool_calls (rowid,id,run_id,bot_id,tool_name,risk,arguments,status,created_at,updated_at) VALUES (42,'call','run','b','write_note','write','{}','pending',1,1)")
+        c.exec_driver_sql("INSERT INTO tool_audit (call_id,action,created_at) VALUES ('call','proposed',1)")
+        c.commit()
+    migrate(path);migrate(path)
+    with engine.connect() as c:
+        assert c.exec_driver_sql('SELECT version_num FROM alembic_version').scalar()=='0009_tool_risks'
+        assert c.exec_driver_sql("SELECT rowid FROM tool_calls WHERE id='call'").scalar()==42
+        assert c.exec_driver_sql("SELECT action FROM tool_audit WHERE call_id='call'").scalar()=='proposed'
+        assert c.exec_driver_sql("SELECT value FROM config WHERE key='gateways'").scalar()=='saved-encrypted-gateway'
+        assert c.exec_driver_sql("SELECT character_id FROM bot_characters WHERE bot_id='b'").scalar()=='c'
+        assert c.exec_driver_sql("SELECT name FROM bots WHERE id='b'").scalar()=='Original'
+        c.exec_driver_sql("INSERT INTO tool_calls VALUES ('send','run','b','test','send','{}','pending',NULL,2,2)")
+        c.exec_driver_sql("INSERT INTO tool_calls VALUES ('spend','run','b','test','spend','{}','pending',NULL,3,3)")

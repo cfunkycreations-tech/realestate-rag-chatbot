@@ -1,6 +1,6 @@
 # Funk Bot
 
-Funk Bot is a local-first personal assistant workspace. This repository is a **partial implementation**, not the full persistent-agent platform: it provides password-protected, persistent Bot identities and conversations, configurable OpenAI-compatible gateways, model-profile fallback, and reported token usage. It does not yet give Bots tools, a computer, autonomous routines, semantic memory, delegation, or groups. Do not use it for unattended work or assume it has the safety controls of a complete agent runtime.
+Funk Bot is a local-first personal assistant workspace. This repository is a **partial implementation**, not the full persistent-agent platform: it provides password-protected, persistent Bot identities and conversations, configurable OpenAI-compatible gateways, model-profile fallback, and reported token usage. It provides two limited audited tools, but not a computer, autonomous routines, semantic memory, delegation, or groups. Do not use it for unattended work or assume it has the safety controls of a complete agent runtime.
 
 ## Quickstart (Docker Desktop)
 
@@ -132,17 +132,41 @@ $env:E2E_SETUP_TOKEN = "your-disposable-setup-code"
 npm run test:delete
 ```
 
+### Tool browser check
+
+This check creates a Bot, writes one fixture note, and changes the web policy and gateway. Run it **only against a fresh disposable installation**. In one PowerShell window, from the repository root:
+
+```powershell
+Set-Location frontend
+npm ci
+npx playwright install chromium
+$env:MOCK_PORT = "8030"
+node scripts/mock-tool-gateway.mjs
+```
+
+In a second PowerShell window, use the setup code from the disposable backend logs. The gateway address must be reachable **from the backend**; the example below assumes both backend and mock gateway run directly on the same host, not in separate containers:
+
+```powershell
+Set-Location frontend
+$env:E2E_URL = "http://localhost:3000"
+$env:E2E_GATEWAY_URL = "http://127.0.0.1:8030/v1"
+$env:E2E_SETUP_TOKEN = "your-disposable-setup-code"
+npm run test:tools
+```
+
 ## Current behavior and limitations
 
 **Budget safeguards are not a guarantee of provider billing.** Funk Bot reserves against account and per-Bot daily/monthly caps before chat requests, but it depends on accurate configured prices, a conservative input-token bound, and the gateway honoring output limits and reporting usage. Tokenization overhead, gateway-added charges, incorrect prices, providers that ignore limits, and spending outside Funk Bot can exceed these estimates. Always set provider-side limits and do not leave runs unattended.
 
-Open **Settings → Budget** to set caps and profile prices. The account and each Bot default to $5/day; monthly limits are disabled until configured. Periods use UTC. Each run reserves for every possible fallback; no configured price means the run is refused. Costs for new runs are calculated from reported input/output tokens and the profile's configured prices, not inferred from a model name. If an attempt fails, is interrupted, exceeds configured token bounds, or does not report usage, further spending is blocked until you verify its total in your gateway billing and enter the charge and source in Budget. These owner-supplied corrections are audited. Old usage without a cost must likewise be reconciled when it falls within a capped period. Existing Bots, keys, sprites and messages are not deleted by the budget migrations.
+Open **Settings → Budget** to set caps and profile prices. The account and each Bot default to $5/day; monthly limits are disabled until configured. Periods use UTC. Each model round, including a follow-up after a tool call, reserves for every possible fallback; no configured price means the run is refused. Costs for new runs are calculated from reported input/output tokens and the profile's configured prices, not inferred from a model name. If an attempt fails, is interrupted, exceeds configured token bounds, or does not report usage, further spending is blocked until you verify its total in your gateway billing and enter the charge and source in Budget. These owner-supplied corrections are audited. Old usage without a cost must likewise be reconciled when it falls within a capped period. Existing Bots, keys, sprites and messages are not deleted by the budget migrations.
 
 - Each Bot has its own stored timeline and identity. The last 40 messages are sent as context; this is conversation history, not semantic memory. Deleting a Bot deletes its messages.
 - The database uses SQLAlchemy connections with Alembic migrations, adopting existing slice databases without replacing their rows. SQL queries and migrations remain SQLite-specific; PostgreSQL support is not implemented. Back up the full data volume before upgrading.
 - Chat runs in the backend and can finish after the browser closes, provided the backend keeps running. Run records and streamed events are stored in SQLite. Reopening a Bot reconnects to an active run; after a backend restart, unfinished runs are marked failed and surfaced in that Bot’s chat rather than automatically resumed. Run the backend with one worker only. Provider text streams through a sliding-window redactor for saved gateway keys and common key patterns. The filter deliberately delays a small tail of text and cannot detect all possible secrets.
-- Profiles attempt entries in order for rate limits, server failures, connection errors, and empty responses. Client errors stop the chain. The app does not yet implement tool calling or tool-call fallback.
+- Profiles attempt entries in order for rate limits, server failures, connection errors, and empty responses. Client errors and partially emitted responses stop the chain. The gateway and selected model must support OpenAI-compatible streamed tool calls. If a prior attempt may have incurred an unknown charge, no tools are executed and the charge must be reconciled before more spending.
+- Bots can request `web_fetch` and `write_note`; there is no shell tool. Web access is default-deny; configure exact hosts or domain suffixes in **Settings → Web access**. Deny rules override allow rules, every resolved address must be public, connections use the validated address, redirects/compression are refused, and requests are limited to 256 KiB and 10 seconds. Web pages remain untrusted and can contain misleading or malicious instructions; these safeguards are not a complete defense against prompt injection.
+- `write_note` creates a new `.txt` file only within the individual Bot's workspace. The owner sees the redacted arguments that will actually execute and must choose **Approve once**, **Approve for this response** (same tool only, current run only), or **Deny**. Review the entire content before approving. Tool activity appears in chat and **Settings → Tool audit**. A pending approval can be stopped; an interrupted or restarted run is never replayed automatically. A completed tool action is not undone if a subsequent model round exceeds a cap or fails. Deleting a Bot deletes its tool audit and conversation, but leaves its workspace note files on disk and returns its sprite to the Vault. Redaction is heuristic, not a guarantee that secrets are removed.
 - Token totals come from reported usage. Known costs include configured-price token charges and owner-reconciled amounts; unknown charges are disclosed rather than treated as free. Caps are reservation-based estimates, not provider-enforced billing limits.
 - Vault encryption protects database contents from casual inspection, but its key is stored alongside the data on the same host. Protect filesystem access and backups. Messages and provider output are redacted for saved gateway keys and common key patterns; no redaction is perfect.
-- The authenticated `/api/events?since=0` endpoint exposes cursor-ordered run starts, message summaries, state changes, errors, and finishes recorded after this upgrade. Existing slice-2 events remain in per-run history and are not backfilled. Deleting a Bot deletes its event history. This is not a complete audit log. No search, file access, MCP, scheduler, webhook, sandbox, approvals, notifications, PWA, export, or browser/computer features are provided in this slice. The UI intentionally does not advertise those as working.
+- The authenticated `/api/events?since=0` endpoint exposes cursor-ordered run starts, message summaries, state changes, errors, and finishes recorded after this upgrade. Existing slice-2 events remain in per-run history and are not backfilled. Deleting a Bot deletes its event history. This is not a complete audit log. Beyond the two tools described above, no general search or file access, MCP, scheduler, webhook, sandbox, notifications, PWA, export, or browser/computer features are provided. The UI intentionally does not advertise those as working.
 - Provider names and defaults are configuration examples, not a guarantee that models are currently available. A working account/key and gateway configuration are required for live inference.

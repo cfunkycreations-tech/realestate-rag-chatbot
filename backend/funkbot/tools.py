@@ -41,7 +41,7 @@ class NotesArgs(BaseModel):
 @dataclass(frozen=True)
 class ToolSpec:
     name: str
-    risk: Literal['read', 'write']
+    risk: Literal['read', 'write', 'send', 'spend']
     args: type[BaseModel]
     description: str
 
@@ -82,13 +82,13 @@ def validate_target(url, allow, deny):
         raise ToolError('Invalid URL.') from exc
     if host == 'localhost' or host.endswith('.localhost') or host.endswith('.local'):
         raise ToolError('Private and non-public addresses are blocked.')
-    if any(host_matches(host, item) for item in deny) or not any(host_matches(host, item) for item in allow):
-        raise ToolError('This website is not allowed by the web fetch policy.')
     try:
         address = ipaddress.ip_address(host)
         if not public_address(address): raise ToolError('Private and non-public addresses are blocked.')
     except ValueError as exc:
         if isinstance(exc, ToolError): raise
+    if any(host_matches(host, item) for item in deny) or not any(host_matches(host, item) for item in allow):
+        raise ToolError('This website is not allowed by the web fetch policy.')
     path = quote(parsed.path or '/', safe="/%:@!$&'()*+,;=-._~")
     if parsed.query: path += '?' + quote(parsed.query, safe="/%:@!$&'()*+,;=?-._~")
     return parsed.scheme, host, port, path

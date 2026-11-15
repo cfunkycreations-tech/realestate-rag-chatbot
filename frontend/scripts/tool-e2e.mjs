@@ -1,0 +1,52 @@
+// Only run against a fresh disposable installation and mock-tool-gateway.
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import {fileURLToPath} from 'node:url';
+import {chromium} from '@playwright/test';
+const here=path.dirname(fileURLToPath(import.meta.url)),base=process.env.E2E_URL,token=process.env.E2E_SETUP_TOKEN,gateway=process.env.E2E_GATEWAY_URL;
+if(!base||!token||!gateway)throw Error('Set E2E_URL, E2E_SETUP_TOKEN and E2E_GATEWAY_URL for a fresh disposable installation.');
+const browser=await chromium.launch({headless:true,args:['--no-sandbox'],...(process.env.E2E_CHROMIUM?{executablePath:process.env.E2E_CHROMIUM}:{})});
+try{
+ const page=await browser.newPage({viewport:{width:1440,height:900},reducedMotion:'reduce'}),req=page.request,errors=[];
+ page.on('pageerror',e=>errors.push(e.message));
+ assert.equal((await (await req.get(base+'/api/auth/status')).json()).setup,false);
+ assert.equal((await req.post(base+'/api/auth/setup',{data:{password:'disposable-test-password',setup_token:token}})).status(),200);
+ const zip=fs.readFileSync(path.join(here,'../tests/fixtures/identity-characters.zip'));
+ assert.equal((await (await req.post(base+'/api/vault/import',{multipart:{file:{name:'sprites.zip',mimeType:'application/zip',buffer:zip}}})).json()).added,2);
+ const bot=await (await req.post(base+'/api/bots',{data:{name:'Fixture',title:'Editor'}})).json();assert(bot.character);
+ assert.equal((await req.put(base+'/api/settings/gateways/custom',{data:{url:gateway}})).status(),200);
+ const settings=await (await req.get(base+'/api/settings')).json();settings.profiles.smart=[{gateway:'custom',model:'fixture'}];
+ assert.equal((await req.put(base+'/api/settings/profiles',{data:settings.profiles})).status(),200);
+ assert.equal((await req.put(base+'/api/budget/prices/smart',{data:{prompt:'1',completion:'2',max_prompt_tokens:16384,max_completion_tokens:512}})).status(),200);
+ await page.goto(base);await page.getByRole('heading',{name:'Your team, at a glance.'}).waitFor();
+ await page.getByRole('button',{name:'Open settings'}).click();await page.getByRole('button',{name:'Web access'}).click();
+ await page.getByLabel('Allowed hosts').fill('.example.com');await page.getByLabel('Denied hosts').fill('private.example.com');await page.getByRole('button',{name:'Save web policy'}).click();await page.getByRole('status').filter({hasText:'Web policy saved.'}).waitFor();
+ await page.screenshot({path:path.join(here,'../../docs/screenshots/tools-policy-desktop.png')});
+ await page.setViewportSize({width:390,height:844});await page.getByRole('button',{name:'Web access'}).click();await page.screenshot({path:path.join(here,'../../docs/screenshots/tools-policy-mobile.png')});
+ assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
+ await page.getByRole('dialog').getByRole('button',{name:'Close',exact:true}).click();
+ await page.setViewportSize({width:1440,height:900});await page.locator('.bot-card-open').first().click();
+ await page.getByLabel('Message your Bot').fill('Please approve a fixture note');await page.getByRole('button',{name:'Send message'}).click();
+ await page.getByText('Needs your approval').waitFor();assert(await page.getByText('A real approved fixture note.').isVisible());
+ await page.getByRole('button',{name:'Approve once'}).scrollIntoViewIfNeeded();await page.screenshot({path:path.join(here,'../../docs/screenshots/tools-approval-desktop.png')});
+ await page.setViewportSize({width:390,height:844});await page.getByRole('button',{name:'Approve once'}).scrollIntoViewIfNeeded();
+ await page.screenshot({path:path.join(here,'../../docs/screenshots/tools-approval-mobile.png')});
+ assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
+ // Reload tests replay of pending approval, not a locally retained card.
+ await page.reload();await page.locator('.bot-card-open').first().click();await page.getByRole('button',{name:'Approve once'}).waitFor();
+ await page.getByRole('button',{name:'Approve once'}).click();await page.getByText('Fixture response after the tool result.').waitFor();
+ await page.getByText('Audit trail').click();await page.getByRole('cell',{name:'approve once'}).waitFor();
+ let latest=await (await req.get(base+`/api/bots/${bot.id}/latest-run`)).json();let calls=await (await req.get(base+`/api/jobs/${latest.id}/tool-calls`)).json();assert.equal(calls[0].status,'completed');
+ await page.getByLabel('Message your Bot').fill('Please deny a fixture note');await page.getByRole('button',{name:'Send message'}).click();await page.getByRole('button',{name:'Deny',exact:true}).waitFor();await page.getByRole('button',{name:'Deny',exact:true}).click();
+ await page.getByText('Fixture response after the tool result.').last().waitFor();await page.waitForFunction(()=>!document.querySelector('[aria-label="Stop response"]'));
+ latest=await (await req.get(base+`/api/bots/${bot.id}/latest-run`)).json();calls=await (await req.get(base+`/api/jobs/${latest.id}/tool-calls`)).json();assert.equal(calls[0].status,'denied');
+ await page.getByLabel('Message your Bot').fill('Please fetch loopback');await page.getByRole('button',{name:'Send message'}).click();await page.waitForFunction(()=>!document.querySelector('[aria-label="Stop response"]'));
+ latest=await (await req.get(base+`/api/bots/${bot.id}/latest-run`)).json();calls=await (await req.get(base+`/api/jobs/${latest.id}/tool-calls`)).json();assert.equal(calls[0].status,'failed');assert.match(calls[0].result.error,/Private/);
+ assert.deepEqual((await (await req.get(base+'/api/settings/web-policy')).json()),{allow:['.example.com'],deny:['private.example.com']});
+ await page.getByRole('button',{name:'Close spotlight'}).click();await page.setViewportSize({width:1440,height:900});await page.getByRole('button',{name:'Open settings'}).click();await page.getByRole('button',{name:'Tool audit',exact:true}).click();await page.getByRole('heading',{name:'Tool audit'}).waitFor();
+ await page.getByRole('cell',{name:'write_note'}).first().waitFor();assert.equal(await page.locator('.audit-table tbody tr').count(),3);
+ await page.screenshot({path:path.join(here,'../../docs/screenshots/tools-audit-desktop.png')});
+ await page.setViewportSize({width:390,height:844});await page.getByRole('button',{name:'Tool audit',exact:true}).click();await page.screenshot({path:path.join(here,'../../docs/screenshots/tools-audit-mobile.png')});assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
+ assert.deepEqual(errors,[]);console.log('Tool approval, reload/replay, denial, SSRF block, audit and policy passed on desktop and 390px.');
+}finally{await browser.close()}

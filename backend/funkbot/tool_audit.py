@@ -37,7 +37,7 @@ def propose(c, run_id, bot_id, name, arguments, redact, now=None):
 def decide(c, call_id, decision, now=None):
     if decision not in ('approve','approve_once','deny'): raise ToolError('Invalid approval decision.')
     row=c.execute('SELECT risk,status FROM tool_calls WHERE id=?', (call_id,)).fetchone()
-    if not row or row['risk']!='write' or row['status']!='pending': raise ToolError('This approval is no longer pending.')
+    if not row or row['risk'] not in ('write','send','spend') or row['status']!='pending': raise ToolError('This approval is no longer pending.')
     now=time.time() if now is None else now
     status='denied' if decision=='deny' else 'approved'
     c.execute('UPDATE tool_calls SET status=?,updated_at=? WHERE id=?', (status,now,call_id))
@@ -71,7 +71,7 @@ def finish(c, call_id, result, success, redact, now=None):
 def approve_from_run_grant(c, call_id, now=None):
     """Use a grant that exists only for the current, live run."""
     now=time.time() if now is None else now
-    changed=c.execute("UPDATE tool_calls SET status='approved',updated_at=? WHERE id=? AND risk='write' AND status='pending'", (now,call_id))
+    changed=c.execute("UPDATE tool_calls SET status='approved',updated_at=? WHERE id=? AND risk IN ('write','send','spend') AND status='pending'", (now,call_id))
     if not changed.rowcount: raise ToolError('This approval is no longer pending.')
     audit(c,call_id,'run_grant',now)
 
