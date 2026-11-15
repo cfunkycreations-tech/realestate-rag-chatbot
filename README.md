@@ -168,12 +168,17 @@ npm run test:missions
 
 This creates missions and a note, adjusts the budget, and must not be run against a real installation. The gateway address must be reachable from the backend.
 
+### Project browser check
+
+With the mock gateway running and a separate fresh disposable installation, set the same `E2E_URL`, `E2E_GATEWAY_URL` and `E2E_SETUP_TOKEN` variables as for the mission browser check and run `npm run test:projects` from `frontend`. This creates a mission, approves a note, and changes project data; do not run it against a real installation.
+
 ## Current behavior and limitations
 
 **Budget safeguards are not a guarantee of provider billing.** Funk Bot reserves against account and per-Bot daily/monthly caps before chat requests, but it depends on accurate configured prices, a conservative input-token bound, and the gateway honoring output limits and reporting usage. Tokenization overhead, gateway-added charges, incorrect prices, providers that ignore limits, and spending outside Funk Bot can exceed these estimates. Always set provider-side limits and do not leave runs unattended.
 
 Open **Settings → Budget** to set caps and profile prices. The account and each Bot default to $5/day; monthly limits are disabled until configured. Periods use UTC. Each model round, including a follow-up after a tool call, reserves for every possible fallback; no configured price means the run is refused. Costs for new runs are calculated from reported input/output tokens and the profile's configured prices, not inferred from a model name. If an attempt fails, is interrupted, exceeds configured token bounds, or does not report usage, further spending is blocked until you verify its total in your gateway billing and enter the charge and source in Budget. These owner-supplied corrections are audited. Old usage without a cost must likewise be reconciled when it falls within a capped period. Existing Bots, keys, sprites and messages are not deleted by the budget migrations.
 
+- Projects contain an optional owner, project notes and links to existing missions. Mission totals come from linked runs and may be awaiting verification. The read-only workspace view shows flat `.txt` files belonging to the owner or linked mission assignees; these files remain Bot-local and can appear in multiple projects. Previews are limited to 64 KB and require secure descriptor-based file access (use Docker where unsupported). Unlinking a mission does not delete it or its files.
 - The Missions list shows the 100 most recent missions and currently supports one Bot per mission; group assignment and delegation are not yet implemented. A queued mission starts when its Bot becomes free. Its result, cost and run events come from the actual run, and tool approvals use the same safety controls as chat. A restart marks unfinished missions failed rather than silently replaying them; check for completed tool side effects before retrying. Quick Mission creates a real mission.
 - Each Bot has its own stored timeline and identity. The last 40 messages are sent as context; this is conversation history, not semantic memory. Deleting a Bot deletes its messages.
 - The database uses SQLAlchemy connections with Alembic migrations, adopting existing slice databases without replacing their rows. SQL queries and migrations remain SQLite-specific; PostgreSQL support is not implemented. Back up the full data volume before upgrading.
