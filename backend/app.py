@@ -120,6 +120,7 @@ async def lifespan(_app: FastAPI):
 app = FastAPI(title='Funk Bot', lifespan=lifespan)
 jobs = {}
 mission_tasks = {}
+lab_tasks = {}
 
 class Password(BaseModel):
     password: str = Field(min_length=8, max_length=256)
@@ -279,6 +280,7 @@ def delete_bot(bot_id: str, request: Request):
     with db() as c:
         c.execute('BEGIN IMMEDIATE')
         if c.execute("SELECT 1 FROM runs WHERE bot_id=? AND status IN ('queued','running','waiting_approval')", (bot_id,)).fetchone(): raise HTTPException(409, 'Wait for the current response before deleting this Bot.')
+        if c.execute("SELECT 1 FROM lab_experiments WHERE bot_id=? AND status IN ('queued','running')",(bot_id,)).fetchone(): raise HTTPException(409,'This Bot has an active Lab experiment.')
         if c.execute("SELECT 1 FROM missions JOIN mission_assignees ON mission_assignees.mission_id=missions.id WHERE mission_assignees.bot_id=? AND missions.status IN ('queued','running','waiting_approval')",(bot_id,)).fetchone():
             raise HTTPException(409,'Cancel the active or queued mission before deleting this Bot.')
         assignment=c.execute('SELECT character_id FROM bot_characters WHERE bot_id=?',(bot_id,)).fetchone()
@@ -518,6 +520,8 @@ def mark_interrupted_runs():
             append_event(c, row['bot_id'], row['id'], 'run.finished', {'status':'failed'})
             c.execute("UPDATE mission_runs SET status='failed',error=?,updated_at=? WHERE run_id=? AND status IN ('queued','running','waiting_approval')",('Backend restarted before the mission finished.',time.time(),row['id']))
             c.execute("UPDATE missions SET status='failed',error=?,updated_at=? WHERE id IN (SELECT mission_id FROM mission_runs WHERE run_id=?) AND status IN ('queued','running','waiting_approval')",('Backend restarted before the mission finished.',time.time(),row['id']))
+        c.execute("UPDATE lab_experiments SET status='failed',error='Backend restarted before the experiment finished.',updated_at=? WHERE status IN ('queued','running')",(time.time(),))
+        c.execute("UPDATE lab_runs SET status='failed',error='Backend restarted before the experiment finished.',updated_at=? WHERE status IN ('queued','running')",(time.time(),))
         # Queued work is not silently replayed after an unexpected restart.
         c.execute("UPDATE missions SET status='failed',error=?,updated_at=? WHERE status IN ('queued','running','waiting_approval')",('Backend restarted before the mission finished.',time.time()))
         c.execute("UPDATE mission_runs SET status='failed',error=?,updated_at=? WHERE status IN ('queued','running','waiting_approval')",('Backend restarted before the mission finished.',time.time()))
@@ -562,9 +566,10 @@ def finish_run(job, status, kind, values=None, completion=None):
             return
         if completion:
             bot_id, content, gateway, model, usage = completion
-            message_id = str(uuid.uuid4())
-            c.execute('INSERT INTO messages VALUES (?,?,?,?,?)', (message_id, bot_id, 'assistant', content, time.time()))
-            append_event(c, bot_id, job['id'], 'message.sent', {'message_id':message_id, 'role':'assistant', 'summary':content[:240]})
+            if not job.get('lab_step_id'):
+                message_id = str(uuid.uuid4())
+                c.execute('INSERT INTO messages VALUES (?,?,?,?,?)', (message_id, bot_id, 'assistant', content, time.time()))
+                append_event(c, bot_id, job['id'], 'message.sent', {'message_id':message_id, 'role':'assistant', 'summary':content[:240]})
             warning=settle_round(c,job,bot_id,gateway,model,usage)
             if warning: values['warning']=warning
         else:
@@ -581,6 +586,8 @@ def finish_run(job, status, kind, values=None, completion=None):
             c.execute('UPDATE mission_runs SET status=?,result=?,error=?,updated_at=? WHERE run_id=?',(status,result,reason,time.time(),job['id']))
             if not job.get('group_managed'):
                 c.execute('UPDATE missions SET status=?,result=?,error=?,updated_at=? WHERE id=?',(status,result,reason,time.time(),job['mission_id']))
+        if job.get('lab_step_id'):
+            c.execute('UPDATE lab_runs SET status=?,result=?,error=?,updated_at=? WHERE id=?',(status,completion[1] if completion else None,values.get('message') if status!='done' else None,time.time(),job['lab_step_id']))
         append_event(c, job['bot_id'], job['id'], 'run.finished', {'status':status})
     job['done'] = True
     job['notify'].set()
@@ -617,7 +624,7 @@ def tool_event(job, item):
 async def run_chat(job, bot, history, profile):
     entries=job.get('entries') or json.loads(config('profiles')).get(profile,[])
     messages=[{'role':'system','content':bot_system_prompt(bot)},*history]
-    tool_definitions=declarations() if 'id' in job else []
+    tool_definitions=declarations() if 'id' in job and not job.get('lab_step_id') else []
     complete_text=''
     try:
         for round_number in range(5):
@@ -679,6 +686,8 @@ async def run_chat(job, bot, history, profile):
             if not result:
                 finish_run(job,'failed','error',{'message':failure_message});return
             content,calls,usage,entry=result
+            if calls and job.get('lab_step_id'):
+                finish_run(job,'failed','error',{'message':'The gateway returned a tool call in a side-effect-free Lab run.'});return
             complete_text+=content
             if not calls:
                 if 'id' in job:
@@ -720,7 +729,7 @@ async def run_chat(job, bot, history, profile):
     except BudgetError as exc:
         finish_run(job,'failed','error',{'message':str(exc)})
 
-async def start_chat(bot_id: str, body: ChatIn, mission_id: str | None = None, group_managed=False, mission_role='member'):
+async def start_chat(bot_id: str, body: ChatIn, mission_id: str | None = None, group_managed=False, mission_role='member', lab_step_id=None, lab_system_prompt=None):
     # Compute redaction before acquiring the write lock: redact reads config.
     keys = configured_secrets()
     content = redact_text(body.content, keys)
@@ -736,22 +745,23 @@ async def start_chat(bot_id: str, body: ChatIn, mission_id: str | None = None, g
         bot=dict(row)
         for field in ('name','title','personality'):
             bot[field] = redact_text(bot[field], keys)
+        if lab_step_id: bot['personality']=redact_text(lab_system_prompt,keys)
         memory=[];memory_size=0
         for entry in c.execute('SELECT content FROM bot_memories WHERE bot_id=? ORDER BY pinned DESC,updated_at DESC,id',(bot_id,)):
             text=redact_text(entry['content'],keys)
             if memory_size+len(text)>8000: continue
             memory.append(text);memory_size+=len(text)
-        bot['memory']=memory
+        bot['memory']=[] if lab_step_id else memory
         now=time.time()
         chosen_profile=body.profile or bot['profile']
         entries=json.loads(c.execute('SELECT value FROM config WHERE key=?', ('profiles',)).fetchone()['value']).get(chosen_profile,[])
         previous=[{'role':r['role'],'content':r['content']} for r in c.execute('SELECT role,content FROM messages WHERE bot_id=? ORDER BY created_at DESC LIMIT 39',(bot_id,)).fetchall()][::-1]
-        history=[*previous,{'role':'user','content':content}]
+        history=[*([] if lab_step_id else previous),{'role':'user','content':content}]
         price=c.execute('SELECT * FROM budget_prices WHERE profile=?', (chosen_profile,)).fetchone()
         if price:
             # Conservative byte estimate with protocol overhead, not a guarantee
             # for unknown tokenizers or gateways that add unreported tokens.
-            bound = prompt_bound([{'role':'system','content':bot_system_prompt(bot)},*history],declarations())
+            bound = prompt_bound([{'role':'system','content':bot_system_prompt(bot)},*history],[] if lab_step_id else declarations())
             if bound > price['max_prompt_tokens']:
                 raise HTTPException(400, 'Message and conversation exceed the configured prompt token safety bound for this profile.')
         try:
@@ -761,12 +771,16 @@ async def start_chat(bot_id: str, body: ChatIn, mission_id: str | None = None, g
         if mission_id:
             c.execute('INSERT INTO mission_runs VALUES (?,?,?,?,?,?,?,?,?,?)',(str(uuid.uuid4()),mission_id,bot_id,job_id,mission_role,'running',None,None,now,now))
             c.execute("UPDATE missions SET status='running',updated_at=? WHERE id=?",(now,mission_id))
+        if lab_step_id:
+            changed=c.execute("UPDATE lab_runs SET run_id=?,status='running',updated_at=? WHERE id=? AND status='queued'",(job_id,now,lab_step_id))
+            if not changed.rowcount: raise HTTPException(409,'Lab run is no longer queued.')
         append_event(c, bot_id, job_id, 'run.started', {'status':'running'})
         record_event(c, job_id, 'bot.state_changed', {'state':'working'})
-        message_id = str(uuid.uuid4())
-        c.execute('INSERT INTO messages VALUES (?,?,?,?,?)',(message_id,bot_id,'user',content,now))
-        append_event(c, bot_id, job_id, 'message.sent', {'message_id':message_id, 'role':'user', 'summary':content[:240]})
-    job={'id':job_id,'bot_id':bot_id,'done':False,'created':time.time(),'notify':asyncio.Event(),'entries':entries,'max_completion_tokens':price['max_completion_tokens'],'max_prompt_tokens':price['max_prompt_tokens'],'secrets':set(keys),'mission_id':mission_id,'group_managed':group_managed}; jobs[job_id]=job
+        if not lab_step_id:
+            message_id = str(uuid.uuid4())
+            c.execute('INSERT INTO messages VALUES (?,?,?,?,?)',(message_id,bot_id,'user',content,now))
+            append_event(c, bot_id, job_id, 'message.sent', {'message_id':message_id, 'role':'user', 'summary':content[:240]})
+    job={'id':job_id,'bot_id':bot_id,'done':False,'created':time.time(),'notify':asyncio.Event(),'entries':entries,'max_completion_tokens':price['max_completion_tokens'],'max_prompt_tokens':price['max_prompt_tokens'],'secrets':set(keys),'mission_id':mission_id,'group_managed':group_managed,'lab_step_id':lab_step_id}; jobs[job_id]=job
     policy=WebPolicy.model_validate_json(config('web_policy','{}'))
     context=ToolContext(db,DATA,job_id,bot_id,lambda text:redact_text(text,list(job['secrets'])),policy.allow,policy.deny,lambda _:None)
     job['tool_bridge']=ToolBridge(context,lambda item:tool_event(job,item))
@@ -1006,6 +1020,121 @@ async def cancel_mission(mission_id: str, request: Request):
     if not job or job['done']: raise HTTPException(409,'This mission cannot be cancelled on this worker.')
     job['user_cancelled']=True;job['task'].cancel()
     return {'ok':True}
+
+
+class LabIn(BaseModel):
+    bot_id: str = Field(min_length=1,max_length=128)
+    prompt: str = Field(min_length=1,max_length=12000)
+    system_prompt: str = Field(min_length=1,max_length=6000)
+    profiles: list[Literal['fast','smart','thinker','vision','cheap-bulk']] = Field(min_length=1,max_length=3)
+
+
+async def run_lab(experiment_id):
+    try:
+        with db() as c:
+            experiment=c.execute("SELECT * FROM lab_experiments WHERE id=? AND status='queued'",(experiment_id,)).fetchone()
+            if not experiment: return
+            steps=[dict(r) for r in c.execute('SELECT * FROM lab_runs WHERE experiment_id=? ORDER BY position',(experiment_id,))]
+            c.execute("UPDATE lab_experiments SET status='running',updated_at=? WHERE id=?",(time.time(),experiment_id))
+        for step in steps:
+            while True:
+                try:
+                    result=await start_chat(experiment['bot_id'],ChatIn(content=experiment['prompt'],profile=step['profile']),lab_step_id=step['id'],lab_system_prompt=experiment['system_prompt'])
+                    break
+                except HTTPException as exc:
+                    if exc.status_code==409 and exc.detail=='This Bot is already responding.': await asyncio.sleep(1);continue
+                    raise ValueError(str(exc.detail)) from exc
+            job=jobs[result['job_id']];await asyncio.shield(job['task'])
+            with db() as c: finished=c.execute('SELECT status,error FROM lab_runs WHERE id=?',(step['id'],)).fetchone()
+            if not finished or finished['status']!='done': raise ValueError(finished['error'] if finished and finished['error'] else 'A Lab run did not complete.')
+        with db() as c: c.execute("UPDATE lab_experiments SET status='done',updated_at=? WHERE id=? AND status='running'",(time.time(),experiment_id))
+    except asyncio.CancelledError:
+        with db() as c:
+            c.execute("UPDATE lab_experiments SET status='failed',error='Backend stopped before the experiment finished.',updated_at=? WHERE id=? AND status IN ('queued','running')",(time.time(),experiment_id))
+            c.execute("UPDATE lab_runs SET status='failed',error='Backend stopped before the experiment finished.',updated_at=? WHERE experiment_id=? AND status='queued'",(time.time(),experiment_id))
+        raise
+    except Exception as exc:
+        message=str(exc)[:500] if isinstance(exc,ValueError) else 'The experiment could not continue unexpectedly.'
+        with db() as c:
+            c.execute("UPDATE lab_experiments SET status='failed',error=?,updated_at=? WHERE id=? AND status IN ('queued','running')",(message,time.time(),experiment_id))
+            c.execute("UPDATE lab_runs SET status='failed',error=?,updated_at=? WHERE experiment_id=? AND status='queued'",(message,time.time(),experiment_id))
+
+
+@app.post('/api/lab')
+async def create_lab(body: LabIn, request: Request):
+    require_auth(request);keys=configured_secrets();prompt=redact_text(body.prompt.strip(),keys);system_prompt=redact_text(body.system_prompt.strip(),keys)
+    if not prompt or not system_prompt or len(set(body.profiles))!=len(body.profiles): raise HTTPException(400,'Enter prompts and choose distinct profiles.')
+    now=time.time();eid=str(uuid.uuid4())
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        if not c.execute('SELECT 1 FROM bots WHERE id=?',(body.bot_id,)).fetchone(): raise HTTPException(404,'Bot not found.')
+        c.execute('INSERT INTO lab_experiments VALUES (?,?,?,?,?,?,?,?)',(eid,body.bot_id,prompt,system_prompt,'queued',None,now,now))
+        for pos,profile in enumerate(body.profiles): c.execute('INSERT INTO lab_runs VALUES (?,?,?,?,?,?,?,?,?,?)',(str(uuid.uuid4()),eid,pos,profile,None,'queued',None,None,now,now))
+    task=asyncio.create_task(run_lab(eid));lab_tasks[eid]=task
+    def cleanup(finished):
+        lab_tasks.pop(eid,None)
+        if not finished.cancelled(): finished.exception()
+    task.add_done_callback(cleanup)
+    return {'id':eid}
+
+
+def lab_out(c,row):
+    item=dict(row);runs=[]
+    for entry in c.execute('SELECT * FROM lab_runs WHERE experiment_id=? ORDER BY position',(row['id'],)).fetchall():
+        run=dict(entry);records=c.execute('''SELECT budget_reservations.status,budget_reservations.actual_nanos,usage.prompt_tokens,usage.completion_tokens FROM budget_reservations LEFT JOIN usage ON usage.id=budget_reservations.usage_id WHERE budget_reservations.parent_run_id=?''',(run['run_id'],)).fetchall() if run['run_id'] else []
+        run['prompt_tokens']=sum(r['prompt_tokens'] or 0 for r in records);run['completion_tokens']=sum(r['completion_tokens'] or 0 for r in records)
+        run['cost_usd']=None if any(r['status'] in ('reserved','uncertain') for r in records) else sum(r['actual_nanos'] or 0 for r in records)/NANOS_PER_DOLLAR
+        timing=c.execute('SELECT created_at,updated_at,status FROM runs WHERE id=?',(run['run_id'],)).fetchone() if run['run_id'] else None
+        run['latency_ms']=round((timing['updated_at']-timing['created_at'])*1000,2) if timing and timing['status'] in ('done','failed','cancelled') else None
+        runs.append(run)
+    item['runs']=runs
+    return item
+
+
+@app.get('/api/lab')
+def list_lab(request: Request):
+    require_auth(request)
+    with db() as c: return [lab_out(c,r) for r in c.execute('SELECT * FROM lab_experiments ORDER BY created_at DESC,id DESC LIMIT 30').fetchall()]
+
+
+@app.get('/api/lab/{experiment_id}')
+def get_lab(experiment_id: str, request: Request):
+    require_auth(request)
+    with db() as c:
+        row=c.execute('SELECT * FROM lab_experiments WHERE id=?',(experiment_id,)).fetchone()
+        if not row: raise HTTPException(404,'Experiment not found.')
+        return lab_out(c,row)
+
+
+@app.post('/api/lab/{experiment_id}/apply-prompt')
+def apply_lab_prompt(experiment_id: str, request: Request):
+    require_auth(request)
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        row=c.execute("SELECT * FROM lab_experiments WHERE id=? AND status='done'",(experiment_id,)).fetchone()
+        if not row: raise HTTPException(409,'Only a completed experiment can save its tested prompt.')
+        if not row['bot_id'] or not c.execute('UPDATE bots SET personality=? WHERE id=?',(row['system_prompt'],row['bot_id'])).rowcount: raise HTTPException(404,'Bot not found.')
+    return {'ok':True}
+
+
+class LabNoteIn(BaseModel):
+    project_id: str = Field(min_length=1,max_length=128)
+
+
+@app.post('/api/lab/{experiment_id}/save-note')
+def save_lab_note(experiment_id: str, body: LabNoteIn, request: Request):
+    require_auth(request);now=time.time();note_id=str(uuid.uuid4())
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        row=c.execute("SELECT * FROM lab_experiments WHERE id=? AND status IN ('done','failed')",(experiment_id,)).fetchone()
+        if not row: raise HTTPException(409,'Wait for the experiment to finish before saving a note.')
+        if not c.execute('SELECT 1 FROM projects WHERE id=?',(body.project_id,)).fetchone(): raise HTTPException(404,'Project not found.')
+        steps=c.execute('SELECT profile,status,result,error FROM lab_runs WHERE experiment_id=? ORDER BY position',(experiment_id,)).fetchall()
+        text='Lab prompt: '+row['prompt']+'\n\n'+'\n\n'.join(r['profile']+' ('+r['status']+'): '+(r['result'] or r['error'] or 'No response') for r in steps)
+        if len(text)>18000: raise HTTPException(400,'The results exceed the 18,000-character project note limit.')
+        c.execute('INSERT INTO project_notes VALUES (?,?,?,?,?)',(note_id,body.project_id,text,now,now))
+        c.execute('UPDATE projects SET updated_at=? WHERE id=?',(now,body.project_id))
+    return {'id':note_id}
 
 
 class MemoryIn(BaseModel):
