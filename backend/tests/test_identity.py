@@ -33,3 +33,30 @@ def test_existing_bot_sprite_requires_explicit_choice_and_preserves_other_fields
         assert (bots[two]['name'],bots[two]['title'])==('Gizmo','Editor')
         assert client.post('/api/auth/logout').status_code==200
         assert client.post(f'/api/bots/{two}/sprite',json={'adopt_character_name':False}).status_code==401
+
+
+def test_duplicate_copies_identity_sprite_and_budget_but_not_history_or_memory():
+    with TestClient(service.app) as client:
+        assert client.post('/api/bots/missing/duplicate').status_code==401
+        setup(client)
+        assert client.post('/api/bots/missing/duplicate').status_code==404
+        client.post('/api/vault/import',files={'file':('a.zip',archive([('a.png',png('Gizmo'))]),'application/zip')})
+        bot=client.post('/api/bots',json={'title':'Editor','personality':'Edit carefully','profile':'fast'}).json()['id']
+        client.put('/api/budget/limits/bot:'+bot,json={'daily':'2.5','monthly':'10'})
+        client.post(f'/api/bots/{bot}/memory',json={'content':'A private fact'})
+        with service.db() as c:
+            c.execute('INSERT INTO messages VALUES (?,?,?,?,?)',('message',bot,'user','Private conversation',1))
+        clone=client.post(f'/api/bots/{bot}/duplicate').json()['id']
+        original,duplicate=({b['id']:b for b in client.get('/api/bots').json()}[key] for key in (bot,clone))
+        assert duplicate['name']==original['name']+' (copy)'
+        for field in ('title','personality','profile','shape','color'): assert duplicate[field]==original[field]
+        assert duplicate['character']['name']==original['character']['name']
+        assert client.get(f'/api/bots/{clone}/avatar').content==client.get(f'/api/bots/{bot}/avatar').content
+        assert client.get(f'/api/bots/{clone}/memory').json()==[]
+        assert client.get(f'/api/bots/{clone}/messages').json()==[]
+        assert client.get('/api/budget').json()['bots'][clone]==client.get('/api/budget').json()['bots'][bot]
+        assert client.delete(f'/api/bots/{bot}').status_code==200
+        assert client.get(f'/api/bots/{clone}/avatar').status_code==200
+        assert client.get('/api/vault/status').json()['available']==0
+        assert client.delete(f'/api/bots/{clone}').status_code==200
+        assert client.get('/api/vault/status').json()['available']==1

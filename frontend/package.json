@@ -20,7 +20,8 @@
     "test:projects": "node scripts/projects-e2e.mjs",
     "test:groups": "node scripts/groups-e2e.mjs",
     "test:lab": "node scripts/lab-analytics-e2e.mjs",
-    "test:memory-layers": "node scripts/memory-layers-e2e.mjs"
+    "test:memory-layers": "node scripts/memory-layers-e2e.mjs",
+    "test:duplicate": "node scripts/duplicate-e2e.mjs"
   },
   "dependencies": {
     "@tanstack/react-virtual": "^3.14.26",

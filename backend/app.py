@@ -244,6 +244,25 @@ def create_bot(body: BotIn, request: Request):
             c.execute('UPDATE bots SET name=? WHERE id=?', (redact_text(character['name'], keys),id))
     return {'id':id,'character':redact_character(character, configured_secrets()) if character else None}
 
+
+@app.post('/api/bots/{bot_id}/duplicate')
+def duplicate_bot(bot_id: str, request: Request):
+    require_auth(request)
+    keys=configured_secrets();new_id=str(uuid.uuid4());now=time.time()
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        bot=c.execute('SELECT * FROM bots WHERE id=?',(bot_id,)).fetchone()
+        if not bot: raise HTTPException(404,'Bot not found.')
+        name=redact_text(bot['name'],keys)[:113]+' (copy)'
+        c.execute('INSERT INTO bots VALUES (?,?,?,?,?,?,?,?)',(new_id,name,redact_text(bot['title'],keys),redact_text(bot['personality'],keys),bot['color'],bot['shape'],bot['profile'],now))
+        character=c.execute('SELECT character_id FROM bot_characters WHERE bot_id=?',(bot_id,)).fetchone()
+        if character:
+            c.execute('INSERT INTO bot_characters VALUES (?,?,?)',(new_id,character['character_id'],now))
+        limit=c.execute('SELECT daily_nanos,monthly_nanos FROM budget_limits WHERE scope=?',('bot:'+bot_id,)).fetchone()
+        if limit:
+            c.execute('INSERT INTO budget_limits VALUES (?,?,?)',('bot:'+new_id,limit['daily_nanos'],limit['monthly_nanos']))
+    return {'id':new_id}
+
 class SpriteChoice(BaseModel):
     adopt_character_name: bool
 
