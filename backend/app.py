@@ -881,6 +881,124 @@ async def cancel_mission(mission_id: str, request: Request):
     return {'ok':True}
 
 
+class ProjectIn(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+    description: str = Field(default='', max_length=18000)
+    owner_bot_id: str | None = Field(default=None, max_length=128)
+
+
+class ProjectNoteIn(BaseModel):
+    content: str = Field(min_length=1, max_length=18000)
+
+
+def project_out(c, row, details=False):
+    project = dict(row)
+    rows = c.execute('SELECT missions.* FROM missions JOIN project_missions ON project_missions.mission_id=missions.id WHERE project_missions.project_id=? ORDER BY missions.created_at DESC,missions.id DESC', (row['id'],)).fetchall()
+    missions = [mission_out(c, item) for item in rows]
+    project['counts'] = {status: sum(m['status'] == status for m in missions) for status in ('queued','running','waiting_approval','done','failed','cancelled')}
+    project['cost_usd'] = None if any(m['cost_usd'] is None for m in missions) else sum(m['cost_usd'] for m in missions)
+    if details:
+        project['missions'] = missions
+        project['notes'] = [dict(note) for note in c.execute('SELECT * FROM project_notes WHERE project_id=? ORDER BY created_at,id', (row['id'],))]
+    return project
+
+
+def project_fields(body):
+    keys=configured_secrets()
+    name=redact_text(body.name.strip(), keys)
+    description=redact_text(body.description.strip(), keys)
+    if not name: raise HTTPException(400, 'Enter a project name.')
+    return name, description
+
+
+@app.post('/api/projects')
+def create_project(body: ProjectIn, request: Request):
+    require_auth(request)
+    name,description=project_fields(body); project_id=str(uuid.uuid4()); now=time.time()
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        if body.owner_bot_id and not c.execute('SELECT 1 FROM bots WHERE id=?',(body.owner_bot_id,)).fetchone(): raise HTTPException(404, 'Owner Bot not found.')
+        c.execute('INSERT INTO projects VALUES (?,?,?,?,?,?)',(project_id,name,description,body.owner_bot_id,now,now))
+    return {'id':project_id}
+
+
+@app.get('/api/projects')
+def list_projects(request: Request):
+    require_auth(request)
+    with db() as c:
+        return [project_out(c,row) for row in c.execute('SELECT * FROM projects ORDER BY updated_at DESC,id DESC LIMIT 100').fetchall()]
+
+
+@app.get('/api/projects/{project_id}')
+def get_project(project_id: str, request: Request):
+    require_auth(request)
+    with db() as c:
+        row=c.execute('SELECT * FROM projects WHERE id=?',(project_id,)).fetchone()
+        if not row: raise HTTPException(404, 'Project not found.')
+        return project_out(c,row,details=True)
+
+
+@app.put('/api/projects/{project_id}')
+def update_project(project_id: str, body: ProjectIn, request: Request):
+    require_auth(request)
+    name,description=project_fields(body)
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        if not c.execute('SELECT 1 FROM projects WHERE id=?',(project_id,)).fetchone(): raise HTTPException(404, 'Project not found.')
+        if body.owner_bot_id and not c.execute('SELECT 1 FROM bots WHERE id=?',(body.owner_bot_id,)).fetchone(): raise HTTPException(404, 'Owner Bot not found.')
+        c.execute('UPDATE projects SET name=?,description=?,owner_bot_id=?,updated_at=? WHERE id=?',(name,description,body.owner_bot_id,time.time(),project_id))
+    return {'ok':True}
+
+
+@app.post('/api/projects/{project_id}/notes')
+def create_project_note(project_id: str, body: ProjectNoteIn, request: Request):
+    require_auth(request)
+    content=redact_text(body.content.strip(),configured_secrets())
+    if not content: raise HTTPException(400, 'Enter a note.')
+    note_id=str(uuid.uuid4());now=time.time()
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        if not c.execute('SELECT 1 FROM projects WHERE id=?',(project_id,)).fetchone(): raise HTTPException(404, 'Project not found.')
+        c.execute('INSERT INTO project_notes VALUES (?,?,?,?,?)',(note_id,project_id,content,now,now))
+        c.execute('UPDATE projects SET updated_at=? WHERE id=?',(now,project_id))
+    return {'id':note_id}
+
+
+@app.delete('/api/projects/{project_id}/notes/{note_id}')
+def delete_project_note(project_id: str, note_id: str, request: Request):
+    require_auth(request)
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        if not c.execute('DELETE FROM project_notes WHERE project_id=? AND id=?',(project_id,note_id)).rowcount: raise HTTPException(404, 'Project note not found.')
+        c.execute('UPDATE projects SET updated_at=? WHERE id=?',(time.time(),project_id))
+    return {'ok':True}
+
+
+@app.put('/api/projects/{project_id}/missions/{mission_id}')
+def attach_project_mission(project_id: str, mission_id: str, request: Request):
+    require_auth(request)
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        if not c.execute('SELECT 1 FROM projects WHERE id=?',(project_id,)).fetchone(): raise HTTPException(404, 'Project not found.')
+        if not c.execute('SELECT 1 FROM missions WHERE id=?',(mission_id,)).fetchone(): raise HTTPException(404, 'Mission not found.')
+        existing=c.execute('SELECT project_id FROM project_missions WHERE mission_id=?',(mission_id,)).fetchone()
+        if existing and existing['project_id'] != project_id: raise HTTPException(409, 'Mission already belongs to another project.')
+        now=time.time()
+        c.execute('INSERT OR IGNORE INTO project_missions VALUES (?,?,?)',(project_id,mission_id,now))
+        c.execute('UPDATE projects SET updated_at=? WHERE id=?',(now,project_id))
+    return {'ok':True}
+
+
+@app.delete('/api/projects/{project_id}/missions/{mission_id}')
+def detach_project_mission(project_id: str, mission_id: str, request: Request):
+    require_auth(request)
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        if not c.execute('DELETE FROM project_missions WHERE project_id=? AND mission_id=?',(project_id,mission_id)).rowcount: raise HTTPException(404, 'Project mission not found.')
+        c.execute('UPDATE projects SET updated_at=? WHERE id=?',(time.time(),project_id))
+    return {'ok':True}
+
+
 @app.get('/api/bots/{bot_id}/latest-run')
 def latest_run(bot_id: str, request: Request):
     require_auth(request)
