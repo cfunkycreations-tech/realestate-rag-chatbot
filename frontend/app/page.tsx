@@ -175,7 +175,7 @@ export default function Home(){
     })();
     return()=>controller.abort();
   },[selected,chatId,followRun]);
-  useEffect(()=>{bottom.current?.scrollIntoView({behavior:pendingTool?'auto':'smooth'})},[messages,streamText,toolCalls.length,pendingTool]);
+  useEffect(()=>{if(pendingTool){const card=Array.from(document.querySelectorAll<HTMLElement>('[data-tool-call-id]')).find(el=>el.dataset.toolCallId===pendingTool);if(card){card.scrollIntoView({behavior:'auto',block:'start'});return}}bottom.current?.scrollIntoView({behavior:'smooth'})},[messages,streamText,toolCalls.length,pendingTool]);
   const bot=bots.find(b=>b.id===selected);
   const dueCount=followups.filter(item=>item.due).length;
   const dueNotice=dueCount>0?<button className="due-notice" onClick={()=>{setSpotlight(false);setView('inbox')}}>{dueCount} {dueCount===1?'follow-up':'follow-ups'} due · Open Inbox</button>:null;

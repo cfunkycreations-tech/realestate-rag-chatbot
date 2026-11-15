@@ -44,6 +44,14 @@ class FollowupArgs(BaseModel):
     due: str = Field(min_length=10,max_length=64,description='ISO 8601 datetime with explicit timezone offset, for example 2027-01-15T09:00:00-06:00.')
 
 
+class HandoffArgs(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    to_bot_id: str = Field(min_length=1,max_length=128,description='Receiver ID from the available Bot catalog.')
+    reason: str = Field(min_length=1,max_length=1000)
+    context: str = Field(min_length=1,max_length=12000)
+    receiver_name: str = Field(default='',max_length=120,description='Set by Funk Bot for owner review; do not set this field.')
+
+
 class McpCallArgs(BaseModel):
     model_config = ConfigDict(extra='forbid')
     connector_id: str = Field(min_length=1,max_length=128)
@@ -62,6 +70,7 @@ class ToolSpec:
 
 
 REGISTRY = {
+    'create_handoff': ToolSpec('create_handoff', 'send', HandoffArgs, 'Propose a mission handoff to another available Bot using its catalog ID, reason and context. Every handoff requires separate owner approval and may incur model charges.'),
     'mcp_call': ToolSpec('mcp_call', 'send', McpCallArgs, 'Call an explicitly allowlisted MCP connector tool. Every call requires owner approval. Use connector IDs and tool names from the system catalog.'),
     'web_fetch': ToolSpec('web_fetch', 'read', WebFetchArgs, 'Fetch text from an explicitly allowed public website.'),
     'write_note': ToolSpec('write_note', 'write', NotesArgs, 'Create a text note in this Bot’s workspace.'),
