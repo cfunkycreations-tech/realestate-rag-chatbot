@@ -37,6 +37,37 @@ def test_slice2_database_migrates_without_data_loss(tmp_path, monkeypatch):
         assert c.execute('SELECT status FROM runs WHERE id=?',('r',)).fetchone()['status'] == 'done'
         assert c.execute('SELECT event_type FROM run_events WHERE run_id=?',('r',)).fetchone()['event_type'] == 'done'
         assert c.execute('SELECT completion_tokens FROM usage').fetchone()['completion_tokens'] == 7
-        assert c.execute('SELECT version_num FROM alembic_version').fetchone()[0] == '0004_team_indexes'
+        assert c.execute('SELECT version_num FROM alembic_version').fetchone()[0] == '0005_budget_foundation'
     assert json.loads(service.config('gateways'))['openrouter']['key'] == encrypted
     assert service.gateway_config('openrouter')[1]['Authorization'] == 'Bearer ' + secret
+
+
+def test_budget_migration_from_previous_schema_preserves_existing_data(tmp_path):
+    from alembic import command
+    from alembic.config import Config
+    from funkbot.database import engine_for, migrate
+    from pathlib import Path
+
+    path = tmp_path / 'previous.db'
+    engine = engine_for(str(path))
+    with engine.connect() as connection:
+        cfg = Config()
+        cfg.set_main_option('script_location', str(Path(service.__file__).parent / 'funkbot' / 'migrations'))
+        cfg.attributes['connection'] = connection
+        command.upgrade(cfg, '0004_team_indexes')
+        connection.commit()
+        connection.exec_driver_sql("INSERT INTO config VALUES ('gateways','encrypted-existing-value')")
+        connection.exec_driver_sql("INSERT INTO bots VALUES ('b','Original','Editor','instructions','mint','round','smart',1)")
+        connection.exec_driver_sql("INSERT INTO characters VALUES ('c','hash','Sprite','sprite','role','[]','note','common',1,1)")
+        connection.exec_driver_sql("INSERT INTO bot_characters VALUES ('b','c',1)")
+        connection.exec_driver_sql("INSERT INTO messages VALUES ('m','b','user','keep',1)")
+        connection.commit()
+    migrate(path)
+    migrate(path)
+    with engine.connect() as connection:
+        assert connection.exec_driver_sql('SELECT version_num FROM alembic_version').scalar() == '0005_budget_foundation'
+        assert connection.exec_driver_sql("SELECT value FROM config WHERE key='gateways'").scalar() == 'encrypted-existing-value'
+        assert connection.exec_driver_sql("SELECT name FROM bots WHERE id='b'").scalar() == 'Original'
+        assert connection.exec_driver_sql("SELECT character_id FROM bot_characters WHERE bot_id='b'").scalar() == 'c'
+        assert connection.exec_driver_sql("SELECT content FROM messages WHERE id='m'").scalar() == 'keep'
+        assert connection.exec_driver_sql('SELECT count(*) FROM budget_reservations').scalar() == 0
