@@ -26,6 +26,10 @@ class ApprovalBroker:
         try: return await future
         finally: self.pending.pop(call_id,None)
 
+    def discard(self, call_id):
+        future=self.pending.pop(call_id,None)
+        if future and not future.done(): future.cancel()
+
     def cancel_all(self):
         for future in self.pending.values():
             if not future.done(): future.cancel()
