@@ -11,8 +11,8 @@ MAX_CALLS=6
 MAX_ARGUMENT_BYTES=20_000
 
 
-def declarations():
-    return [{'type':'function','function':{'name':spec.name,'description':spec.description,'parameters':spec.args.model_json_schema()}} for spec in REGISTRY.values()]
+def declarations(include_mcp=False):
+    return [{'type':'function','function':{'name':spec.name,'description':spec.description,'parameters':spec.args.model_json_schema()}} for spec in REGISTRY.values() if spec.name!='mcp_call' or include_mcp]
 
 
 class CallAccumulator:

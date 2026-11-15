@@ -16,7 +16,7 @@ class ToolBridge:
     def notify(self, event):
         # Register before sending the card, so an immediate response cannot race
         # the server's approval waiter. A run grant needs no second decision.
-        if event['type']=='tool.proposed' and event['status']=='pending' and event['tool'] not in self.context.run_grants:
+        if event['type']=='tool.proposed' and event['status']=='pending' and (event['tool']=='mcp_call' or event['tool'] not in self.context.run_grants):
             self.broker.prepare(event['call_id'])
         try: self.emit(event)
         except Exception:

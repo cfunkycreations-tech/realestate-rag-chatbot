@@ -23,6 +23,8 @@ class ToolContext:
     # The broader approval is deliberately run-scoped, not permanent.
     run_grants: set[str] = field(default_factory=set)
     policy_for: Callable = lambda c,name,risk: 'auto' if risk=='read' else 'ask'
+    connector_info: Callable = lambda c,connector_id: None
+    connector_call: Callable = None
 
 
 def live(c, context):
@@ -43,6 +45,16 @@ async def execute(context: ToolContext, name: str, args: dict, wait_decision):
         spec=tools.REGISTRY.get(name)
         if not spec: raise tools.ToolError('Unknown tool.')
         policy=context.policy_for(c,name,spec.risk)
+        connector=None
+        if name=='mcp_call':
+            parsed=tools.McpCallArgs.model_validate(args)
+            try: arguments=json.loads(parsed.arguments_json)
+            except (ValueError,RecursionError) as exc: raise tools.ToolError('Connector arguments must be a JSON object.') from exc
+            if not isinstance(arguments,dict): raise tools.ToolError('Connector arguments must be a JSON object.')
+            arguments=tool_audit._redact_result(arguments,context.redact)
+            connector=context.connector_info(c,parsed.connector_id)
+            args={**parsed.model_dump(),'arguments_json':json.dumps(arguments,ensure_ascii=False),'endpoint':connector['url'] if connector else '', 'connector_revision':connector['revision'] if connector else ''}
+            if not connector or not connector.get('enabled') or parsed.tool_name not in connector.get('allowed_tools',[]): policy='deny'
         call=tool_audit.propose(c,context.run_id,context.bot_id,name,args,context.redact,policy=policy)
         row=dict(c.execute('SELECT * FROM tool_calls WHERE id=?',(call,)).fetchone())
     try:
@@ -51,7 +63,7 @@ async def execute(context: ToolContext, name: str, args: dict, wait_decision):
             context.notify({'type':'tool.decision','call_id':call,'decision':'policy_denied','status':'denied'})
             return {'status':'denied','message':'The owner tool policy denied this call.'}
         if row['status']=='pending':
-            granted=name in context.run_grants
+            granted=name!='mcp_call' and name in context.run_grants
             decision='run_grant' if granted else await wait_decision(call)
             with context.db() as c:
                 c.execute('BEGIN IMMEDIATE');live(c,context)
@@ -61,12 +73,16 @@ async def execute(context: ToolContext, name: str, args: dict, wait_decision):
                     tool_audit.approve_from_run_grant(c,call);status='approved'
                 else:
                     status=tool_audit.decide(c,call,decision)
-            if not granted and decision=='approve': context.run_grants.add(name)
+            if not granted and decision=='approve' and name!='mcp_call': context.run_grants.add(name)
             context.notify({'type':'tool.decision','call_id':call,'decision':decision,'status':status})
             if status=='denied': return {'status':'denied','message':'The owner denied this tool call.'}
         with context.db() as c:
             c.execute('BEGIN IMMEDIATE');live(c,context)
             current=context.policy_for(c,name,row['risk'])
+            if name=='mcp_call':
+                reviewed=json.loads(row['arguments']);latest=context.connector_info(c,reviewed['connector_id'])
+                if not latest or not latest.get('enabled') or reviewed['tool_name'] not in latest.get('allowed_tools',[]) or latest.get('revision')!=reviewed['connector_revision'] or latest.get('url')!=reviewed['endpoint']: current='deny'
+                connector=latest
             if current=='deny' or (policy=='auto' and current!='auto'):
                 tool_audit.deny_policy_change(c,call);blocked=True
             else: row=tool_audit.claim(c,call);blocked=False
@@ -75,7 +91,10 @@ async def execute(context: ToolContext, name: str, args: dict, wait_decision):
             return {'status':'denied','message':'Tool policy changed before execution.'}
         safe_args=json.loads(row['arguments'])
         try:
-            if name=='web_fetch': result=await tools.web_fetch(tools.WebFetchArgs.model_validate(safe_args),context.allow,context.deny)
+            if name=='mcp_call':
+                if not context.connector_call: raise tools.ToolError('Connector execution is unavailable.')
+                result=await context.connector_call(connector,tools.McpCallArgs.model_validate(safe_args))
+            elif name=='web_fetch': result=await tools.web_fetch(tools.WebFetchArgs.model_validate(safe_args),context.allow,context.deny)
             elif name=='write_note': result=tools.write_note(context.data_dir,context.bot_id,tools.NotesArgs.model_validate(safe_args))
             elif name=='create_followup':
                 body=tools.FollowupArgs.model_validate(safe_args)

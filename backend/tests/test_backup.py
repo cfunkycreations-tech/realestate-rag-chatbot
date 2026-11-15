@@ -28,6 +28,7 @@ def test_backup_restore_roundtrip_is_staged_and_preserves_current_installation()
         setup(c);keys()
         bot=c.post('/api/bots',json={'name':'Original'}).json()['id']
         assert c.put('/api/settings/gateways/openrouter',json={'url':'https://example.com/v1','key':'private-key-abcdefgh12345'}).status_code==200
+        assert c.put('/api/connectors/new',json={'name':'MCP','url':'https://example.com/mcp','key':'connector-token-abcdefgh','enabled':True,'allowed_tools':['read']}).status_code==200
         workspace=service.DATA/'workspaces'/bot;workspace.mkdir(parents=True);(workspace/'note.txt').write_text('precious note')
         (service.DATA/'vault').mkdir();(service.DATA/'vault'/'sprite.png').write_bytes(b'sprite')
         (service.DATA/'banner.png').write_bytes(b'banner')
@@ -47,6 +48,8 @@ def test_backup_restore_roundtrip_is_staged_and_preserves_current_installation()
             assert db.execute('select name from bots').fetchall()==[('Original',)]
             gateways=json.loads(db.execute("select value from config where key='gateways'").fetchone()[0])
             assert Fernet((stage/'vault.key').read_bytes()).decrypt(gateways['openrouter']['key'].encode())==b'private-key-abcdefgh12345'
+            connectors=json.loads(db.execute("select value from config where key='mcp_connectors'").fetchone()[0])
+            assert Fernet((stage/'vault.key').read_bytes()).decrypt(next(iter(connectors.values()))['key'].encode())==b'connector-token-abcdefgh'
         assert len(c.get('/api/bots').json())==2
         assert c.delete('/api/workspace/restore/'+result.json()['staged_id']).status_code==200
         assert not stage.exists() and workspace.exists()

@@ -44,6 +44,15 @@ class FollowupArgs(BaseModel):
     due: str = Field(min_length=10,max_length=64,description='ISO 8601 datetime with explicit timezone offset, for example 2027-01-15T09:00:00-06:00.')
 
 
+class McpCallArgs(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    connector_id: str = Field(min_length=1,max_length=128)
+    tool_name: str = Field(min_length=1,max_length=128,pattern=r'^[A-Za-z0-9_.:-]+$')
+    arguments_json: str = Field(default='{}',max_length=16000,description='JSON object containing exact tool arguments.')
+    endpoint: str = Field(default='',max_length=2048,description='Set by Funk Bot for owner review; do not set this field.')
+    connector_revision: str = Field(default='',max_length=64,description='Set by Funk Bot for owner review; do not set this field.')
+
+
 @dataclass(frozen=True)
 class ToolSpec:
     name: str
@@ -53,6 +62,7 @@ class ToolSpec:
 
 
 REGISTRY = {
+    'mcp_call': ToolSpec('mcp_call', 'send', McpCallArgs, 'Call an explicitly allowlisted MCP connector tool. Every call requires owner approval. Use connector IDs and tool names from the system catalog.'),
     'web_fetch': ToolSpec('web_fetch', 'read', WebFetchArgs, 'Fetch text from an explicitly allowed public website.'),
     'write_note': ToolSpec('write_note', 'write', NotesArgs, 'Create a text note in this Bot’s workspace.'),
     'create_followup': ToolSpec('create_followup', 'write', FollowupArgs, 'Propose a reminder for unfinished Bot work. Requires owner approval; provide an ISO datetime with timezone.'),

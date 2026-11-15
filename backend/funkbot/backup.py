@@ -140,6 +140,11 @@ def restore(archive_path: Path, data: Path, expected_revision: str, older_revisi
             if not isinstance(gateways,dict) or any(not isinstance(g,dict) for g in gateways.values()): raise BackupError('Invalid gateway configuration.')
             for gateway in gateways.values():
                 if gateway.get('key'): key.decrypt(gateway['key'].encode())
+            row=db.execute("SELECT value FROM config WHERE key='mcp_connectors'").fetchone()
+            connectors=json.loads(row[0]) if row else {}
+            if not isinstance(connectors,dict) or any(not isinstance(g,dict) for g in connectors.values()): raise BackupError('Invalid connector configuration.')
+            for connector in connectors.values():
+                if connector.get('key'): key.decrypt(connector['key'].encode())
         if revision!=expected_revision:
             # Migrate only the isolated staged copy, never the active database.
             from funkbot.database import migrate
