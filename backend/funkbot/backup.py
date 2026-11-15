@@ -12,9 +12,10 @@ import stat
 import tempfile
 import uuid
 import zipfile
+from contextlib import closing
 from pathlib import Path, PurePosixPath
 
-from cryptography.fernet import Fernet, InvalidToken
+from cryptography.fernet import Fernet
 
 MAX_TOTAL = 256 * 1024 * 1024
 MAX_FILES = 5000
@@ -62,7 +63,7 @@ def create(data: Path, database: Path, output):
     """Use SQLite's online backup API; do not copy WAL or live DB bytes."""
     with tempfile.TemporaryDirectory(prefix='funk-backup-') as temp:
         snapshot = Path(temp) / 'funk.db'
-        with sqlite3.connect(database.resolve().as_uri()+'?mode=ro', uri=True) as source, sqlite3.connect(snapshot) as dest:
+        with closing(sqlite3.connect(database.resolve().as_uri()+'?mode=ro', uri=True)) as source, closing(sqlite3.connect(snapshot)) as dest:
             source.backup(dest)
         entries = [('funk.db', snapshot), *_files(data)]
         if len(entries) > MAX_FILES: raise BackupError('Workspace contains too many files.')
@@ -90,7 +91,7 @@ def create(data: Path, database: Path, output):
             archive.writestr('manifest.json',manifest)
 
 
-def restore(archive_path: Path, data: Path, expected_revision: str):
+def restore(archive_path: Path, data: Path, expected_revision: str, older_revisions=()):
     """Validate and extract to a new private directory; never replace live data."""
     parent=data / 'restores'
     if parent.is_symlink(): raise BackupError('Unsafe restore directory.')
@@ -128,18 +129,23 @@ def restore(archive_path: Path, data: Path, expected_revision: str):
                 if count!=entry.file_size or digest.hexdigest()!=spec['sha256']: raise BackupError('Backup checksum failed.')
         key=Fernet((stage/'vault.key').read_bytes().strip())
         if not (stage/'session.key').read_text().strip(): raise BackupError('Invalid session key.')
-        with sqlite3.connect((stage/'funk.db').resolve().as_uri()+'?mode=ro',uri=True) as db:
+        with closing(sqlite3.connect((stage/'funk.db').resolve().as_uri()+'?mode=ro',uri=True)) as db:
             db.execute('PRAGMA trusted_schema=OFF')
             if db.execute('PRAGMA quick_check').fetchone()[0]!='ok' or db.execute('PRAGMA foreign_key_check').fetchone(): raise BackupError('Backup database is invalid.')
             revisions=db.execute('SELECT version_num FROM alembic_version').fetchall()
-            if revisions != [(expected_revision,)]: raise BackupError('Backup version does not match this Funk Bot version.')
+            if len(revisions)!=1 or revisions[0][0] not in {expected_revision,*older_revisions}: raise BackupError('Backup version is not compatible with this Funk Bot version.')
+            revision=revisions[0][0]
             row=db.execute("SELECT value FROM config WHERE key='gateways'").fetchone()
             gateways=json.loads(row[0]) if row else {}
             if not isinstance(gateways,dict) or any(not isinstance(g,dict) for g in gateways.values()): raise BackupError('Invalid gateway configuration.')
             for gateway in gateways.values():
                 if gateway.get('key'): key.decrypt(gateway['key'].encode())
+        if revision!=expected_revision:
+            # Migrate only the isolated staged copy, never the active database.
+            from funkbot.database import migrate
+            migrate(stage/'funk.db')
         return stage
-    except (BackupError, OSError, ValueError, KeyError, TypeError, sqlite3.Error, zipfile.BadZipFile, InvalidToken) as exc:
+    except Exception as exc:
         shutil.rmtree(stage,ignore_errors=True)
         if isinstance(exc,BackupError): raise
         raise BackupError('Invalid or damaged workspace backup.') from exc

@@ -99,3 +99,29 @@ def test_restore_rejects_traversal_compression_wrong_key_and_schema():
         assert c.get('/api/workspace/restores').json()==[]
         assert not (service.DATA/'escaped').exists()
         assert c.post('/api/workspace/restore',content=original).status_code==415
+
+
+def test_restore_upgrades_older_snapshot_only_in_isolated_stage(tmp_path):
+    from alembic import command
+    from alembic.config import Config
+    from funkbot.database import engine_for
+    from funkbot.backup import create
+    with TestClient(service.app) as c:
+        setup(c);keys();pause(c)
+        old=tmp_path/'old';old.mkdir()
+        (old/'vault.key').write_bytes((service.DATA/'vault.key').read_bytes())
+        (old/'session.key').write_bytes((service.DATA/'session.key').read_bytes())
+        engine=engine_for(str(old/'funk.db'))
+        with engine.connect() as conn:
+            cfg=Config();cfg.set_main_option('script_location',str(Path(service.__file__).parent/'funkbot'/'migrations'));cfg.attributes['connection']=conn
+            command.upgrade(cfg,'0019_attachments');conn.commit()
+            conn.exec_driver_sql("INSERT INTO config VALUES ('gateways','{}')")
+            conn.exec_driver_sql("INSERT INTO bots VALUES ('b','Preserved','Editor','prompt','mint','round','smart',1)")
+            conn.commit()
+        out=io.BytesIO();create(old,old/'funk.db',out)
+        r=c.post('/api/workspace/restore',content=out.getvalue(),headers={'content-type':'application/zip'});assert r.status_code==200,r.text
+        stage=service.DATA/'restores'/r.json()['staged_id']
+        with sqlite3.connect(stage/'funk.db') as db:
+            assert db.execute('SELECT version_num FROM alembic_version').fetchone()[0]=='0020_group_chats'
+            assert db.execute('SELECT name FROM bots').fetchone()[0]=='Preserved'
+        with sqlite3.connect(old/'funk.db') as db: assert db.execute('SELECT version_num FROM alembic_version').fetchone()[0]=='0019_attachments'

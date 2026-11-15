@@ -29,11 +29,13 @@ class ErrorRaised(BaseModel):
 
 class GroupSession(BaseModel):
     mission_id: str
+    session_kind: Literal['mission','group_chat'] = 'mission'
     participants: list[str] = Field(min_length=2, max_length=6)
 
 
 class GroupExchange(BaseModel):
     mission_id: str
+    session_kind: Literal['mission','group_chat'] = 'mission'
     from_bot_id: str
     to_bot_id: str
     summary: str = Field(max_length=240)

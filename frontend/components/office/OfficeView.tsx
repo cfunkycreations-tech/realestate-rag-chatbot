@@ -21,8 +21,8 @@ function description(e:OfficeEvent,names:Map<string,string>):string{
   if(e.type==='error.raised')return `${name}: ${String(e.payload.message||'A run failed.')}`;
   if(e.type==='run.started')return `${name} started a run.`;
   if(e.type==='run.finished')return `${name} finished: ${String(e.payload.status||'done')}.`;
-  if(e.type==='group.session_started')return `${e.payload.mission_id?'Mission':'Demo'}: the team gathers in the meeting room.`;
-  if(e.type==='group.session_ended')return `${e.payload.mission_id?'Mission':'Demo'}: the meeting ends.`;
+  if(e.type==='group.session_started')return `${e.payload.session_kind==='group_chat'?'Group chat':e.payload.mission_id?'Mission':'Demo'}: the team gathers in the meeting room.`;
+  if(e.type==='group.session_ended')return `${e.payload.session_kind==='group_chat'?'Group chat':e.payload.mission_id?'Mission':'Demo'}: the meeting ends.`;
   if(e.type==='handoff.created')return `${name} handed off to ${names.get(String(e.payload.to_bot_id))||'Bot'}: ${String(e.payload.summary||'')}`;
   if(e.type==='group.delegated')return `${name} delegated: ${String(e.payload.summary||'')}`;
   if(e.type==='group.replied')return `${name} replied: ${String(e.payload.summary||'')}`;
