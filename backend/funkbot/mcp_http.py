@@ -1,7 +1,9 @@
 """Constrained, stateless MCP streamable-HTTP subset for public HTTPS servers.
 
 Every request resolves and pins a public address, validates TLS against the
-original host, and refuses redirects, proxies, compression, SSE and large data.
+original host, and refuses redirects, proxies, compression and large data.
+A bounded SSE response to a POST may contain progress notifications and one
+matching response; server-initiated requests and separate GET streams are not supported.
 Results are untrusted. Stdio/local MCP servers are intentionally not supported.
 """
 import asyncio
@@ -27,6 +29,53 @@ def validate_endpoint(url):
         return url
     except (ValueError,TypeError) as exc:
         raise ToolError('Use a public HTTPS MCP endpoint without credentials, query, or fragment.') from exc
+
+
+class _SSEReply:
+    """Parse bounded SSE frames until the response to this POST arrives.
+
+    Server notifications are ignored, not treated as instructions. Requests
+    from the server require a reply and are rejected instead of being executed.
+    """
+    def __init__(self, expected_id):
+        if expected_id is None: raise ToolError('Unexpected connector event stream.')
+        self.expected_id=expected_id
+        self.line=bytearray();self.lines=[];self.total=0;self.after_cr=False;self.first_line=True
+
+    def _line(self):
+        line=bytes(self.line);self.line.clear()
+        if self.first_line:
+            self.first_line=False
+            if line.startswith(b'\xef\xbb\xbf'): line=line[3:]
+        if line:
+            field,_,value=line.partition(b':')
+            if field==b'data': self.lines.append(value[1:] if value.startswith(b' ') else value)
+            return None
+        if not self.lines: return None
+        message=b'\n'.join(self.lines);self.lines.clear()
+        try: obj=json.loads(message)
+        except (ValueError,UnicodeDecodeError,RecursionError) as exc: raise ToolError('Invalid connector event stream.') from exc
+        if not isinstance(obj,dict) or obj.get('jsonrpc')!='2.0': raise ToolError('Invalid connector event stream.')
+        if 'method' in obj:
+            if 'id' in obj: raise ToolError('Connector server requests are not supported.')
+            return None
+        if type(obj.get('id')) is not type(self.expected_id) or obj['id']!=self.expected_id: raise ToolError('Connector response ID does not match.')
+        return message
+
+    def feed(self, chunk):
+        self.total+=len(chunk)
+        if self.total>MAX_RESPONSE: raise ToolError('Connector response is too large.')
+        # SSE lines may end in CR, LF or CRLF, including across network reads.
+        for byte in chunk:
+            if self.after_cr:
+                self.after_cr=False
+                if byte==10: continue
+            if byte in (10,13):
+                self.after_cr=byte==13
+                reply=self._line()
+                if reply is not None: return reply
+            else: self.line.append(byte)
+        return None
 
 
 async def _request(url, token, payload, session_id=None, protocol_version=None):
@@ -56,7 +105,7 @@ async def _request(url, token, payload, session_id=None, protocol_version=None):
             if protocol_version: headers.append(('MCP-Protocol-Version',protocol_version))
             connection_data=connection.send(h11.Request(method='POST',target=path,headers=headers))
             writer.write(connection_data+connection.send(h11.Data(data=body))+connection.send(h11.EndOfMessage()));await writer.drain()
-            data=bytearray();status=None;response_headers={}
+            data=bytearray();status=None;response_headers={};sse=None
             while True:
                 event=connection.next_event()
                 if event is h11.NEED_DATA:
@@ -66,17 +115,25 @@ async def _request(url, token, payload, session_id=None, protocol_version=None):
                     status=event.status_code;response_headers={k.decode('ascii').lower():v.decode('latin1') for k,v in event.headers}
                     if status<200 or status>=300: raise ToolError('Connector returned a non-success status; redirects are not followed.')
                     if response_headers.get('content-encoding','').lower() not in ('','identity'): raise ToolError('Compressed connector responses are not supported.')
-                    if response_headers.get('content-type','').split(';',1)[0].strip().lower() not in ('','application/json'): raise ToolError('This connector uses an unsupported response format (JSON required).')
+                    content_type=response_headers.get('content-type','').split(';',1)[0].strip().lower()
+                    allowed=('', 'application/json', 'text/event-stream')
+                    if content_type not in allowed and not (payload.get('id') is None and status in (202,204) and content_type=='text/plain'): raise ToolError('This connector uses an unsupported response format.')
+                    if content_type=='text/event-stream': sse=_SSEReply(payload.get('id'))
                     try:
                         if int(response_headers.get('content-length','0'))>MAX_RESPONSE: raise ToolError('Connector response is too large.')
                     except ValueError as exc:
                         if isinstance(exc,ToolError): raise
                         raise ToolError('Invalid connector response length.') from exc
                 elif isinstance(event,h11.Data):
-                    data.extend(event.data)
-                    if len(data)>MAX_RESPONSE: raise ToolError('Connector response is too large.')
+                    if sse is not None:
+                        reply=sse.feed(event.data)
+                        if reply is not None: return reply,response_headers
+                    else:
+                        data.extend(event.data)
+                        if len(data)>MAX_RESPONSE: raise ToolError('Connector response is too large.')
                 elif isinstance(event,h11.EndOfMessage):
                     if status is None: raise ToolError('Connector returned an invalid response.')
+                    if sse is not None: raise ToolError('Connector event stream ended before its response.')
                     return bytes(data),response_headers
                 elif isinstance(event,h11.ConnectionClosed): raise ToolError('Connector closed its response unexpectedly.')
         finally:
@@ -95,7 +152,7 @@ async def request(url,token,payload,session_id=None,protocol_version=None):
 def parse_rpc(raw,expected_id):
     try: result=json.loads(raw)
     except (ValueError,UnicodeError,RecursionError) as exc: raise ToolError('Connector did not return valid JSON.') from exc
-    if not isinstance(result,dict) or result.get('jsonrpc')!='2.0' or result.get('id')!=expected_id or 'error' in result or not isinstance(result.get('result'),dict): raise ToolError('Connector returned an invalid or unsuccessful MCP response.')
+    if not isinstance(result,dict) or result.get('jsonrpc')!='2.0' or (type(result.get('id')) is not type(expected_id) or result.get('id')!=expected_id) or 'error' in result or not isinstance(result.get('result'),dict): raise ToolError('Connector returned an invalid or unsuccessful MCP response.')
     return result['result']
 
 

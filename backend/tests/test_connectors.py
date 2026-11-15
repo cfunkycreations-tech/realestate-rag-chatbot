@@ -125,7 +125,8 @@ def test_two_connector_calls_require_two_decisions(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_real_https_wire_protocol_with_fixture_ca_and_pinned_address(tmp_path,monkeypatch):
+@pytest.mark.parametrize('streamed',[False,True])
+async def test_real_https_wire_protocol_with_fixture_ca_and_pinned_address(tmp_path,monkeypatch,streamed):
     import asyncio,datetime,ipaddress,socket,ssl
     from cryptography import x509
     from cryptography.hazmat.primitives import hashes,serialization
@@ -152,9 +153,20 @@ async def test_real_https_wire_protocol_with_fixture_ca_and_pinned_address(tmp_p
         elif payload['method']=='notifications/initialized': reply=None;status=202
         else: reply={'jsonrpc':'2.0','id':2,'result':{'content':[{'type':'text','text':'ok'}]}};status=200
         output=json.dumps(reply).encode() if reply else b''
-        hdr=[('Content-Type','application/json'),('Content-Length',str(len(output))),('Connection','close')]
+        hdr=[('Content-Type','text/event-stream' if streamed and reply else 'application/json'),('Connection','close')]
         if payload['method']=='initialize': hdr.append(('Mcp-Session-Id','fixture-session'))
-        writer.write(conn.send(h11.Response(status_code=status,headers=hdr))+conn.send(h11.Data(data=output))+conn.send(h11.EndOfMessage()));await writer.drain();writer.close();await writer.wait_closed()
+        if streamed and reply:
+            # Hold the stream open after the matching frame: the client must
+            # finish on the response rather than waiting for connection EOF.
+            output=b'data: {"jsonrpc":"2.0","method":"notifications/progress"}\r\n\r\n'+b'data: '+output+b'\r\n\r\n'
+            writer.write(conn.send(h11.Response(status_code=status,headers=hdr)))
+            for chunk in (output[:13],output[13:37],output[37:]):
+                writer.write(conn.send(h11.Data(data=chunk)));await writer.drain();await asyncio.sleep(0)
+            await reader.read()
+        else:
+            hdr.append(('Content-Length',str(len(output))))
+            writer.write(conn.send(h11.Response(status_code=status,headers=hdr))+conn.send(h11.Data(data=output))+conn.send(h11.EndOfMessage()));await writer.drain()
+        writer.close();await writer.wait_closed()
     server=await asyncio.start_server(handler,'127.0.0.1',0,ssl=serverctx);port=server.sockets[0].getsockname()[1];loop=asyncio.get_running_loop()
     async def resolve(*args,**kwargs): return [(socket.AF_INET,socket.SOCK_STREAM,6,'',('127.0.0.1',port))]
     monkeypatch.setattr(loop,'getaddrinfo',resolve);monkeypatch.setattr(mcp_http,'public_address',lambda address:True);monkeypatch.setattr(mcp_http.ssl,'create_default_context',lambda:clientctx)
@@ -178,3 +190,24 @@ def test_connector_endpoint_change_needs_credential_decision():
         body['clear_key']=True
         assert c.put(f'/api/connectors/{connector}',json=body).status_code==200
         assert not c.get('/api/connectors').json()[0]['has_key']
+
+
+def test_bounded_sse_parser_handles_partial_frames_and_rejects_server_requests():
+    parser=mcp_http._SSEReply(2)
+    assert parser.feed(b': heartbeat\r\ndata: {"jsonrpc":"2.0","method":"notifications/progress"}\r\n\r') is None
+    assert parser.feed(b'\ndata: {"jsonrpc":"2.0",\n') is None
+    reply=parser.feed(b'data: "id":2,"result":{"content":[]}}\n\n')
+    assert mcp_http.parse_rpc(reply,2)=={'content':[]}
+    assert mcp_http.parse_rpc(mcp_http._SSEReply(2).feed(b'data: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{}}\r\r'),2)=={}
+    with pytest.raises(ToolError,match='ID'):
+        mcp_http._SSEReply(1).feed(b'data: {\"jsonrpc\":\"2.0\",\"id\":true,\"result\":{}}\n\n')
+    with pytest.raises(ToolError,match='server requests'):
+        mcp_http._SSEReply(2).feed(b'data: {"jsonrpc":"2.0","id":3,"method":"do_something"}\n\n')
+    with pytest.raises(ToolError,match='ID'):
+        mcp_http._SSEReply(2).feed(b'data: {"jsonrpc":"2.0","id":4,"result":{}}\n\n')
+    with pytest.raises(ToolError,match='large'):
+        mcp_http._SSEReply(2).feed(b'a'*(mcp_http.MAX_RESPONSE+1))
+    with pytest.raises(ToolError,match='Invalid'):
+        mcp_http._SSEReply(2).feed(b'data: not-json\n\n')
+    with pytest.raises(ToolError,match='Unexpected'):
+        mcp_http._SSEReply(None)

@@ -3,6 +3,7 @@
 This substitutes the external MCP service only; the production network policy
 is independently tested in test_connectors.py and is NOT disabled by the app.
 """
+import os
 import sys
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[2]))
@@ -19,4 +20,4 @@ async def call_tool(url,token,name,args):
 
 app.mcp_http.list_tools=list_tools
 app.mcp_http.call_tool=call_tool
-uvicorn.run(app.app,host='0.0.0.0',port=8040)
+uvicorn.run(app.app,host='0.0.0.0',port=int(os.environ.get('FUNK_TEST_PORT','8040')))
