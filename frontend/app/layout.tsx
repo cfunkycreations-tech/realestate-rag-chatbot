@@ -1,4 +1,4 @@
 import './globals.css';
 import type { Metadata } from 'next';
-export const metadata: Metadata = { title: 'Funk Bot', description: 'A little more room to think.' };
+export const metadata: Metadata = { title: 'Funk Bot', description: 'A little more room to think.', manifest: '/manifest.webmanifest' };
 export default function RootLayout({children}:{children:React.ReactNode}) { return <html lang="en"><body>{children}</body></html>; }

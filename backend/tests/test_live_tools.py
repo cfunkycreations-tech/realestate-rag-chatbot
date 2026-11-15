@@ -165,3 +165,15 @@ def test_tool_card_note_and_model_followup_use_identical_redacted_arguments(monk
         assistant=captured[1]['messages'][-2]
         assert json.loads(assistant['tool_calls'][0]['function']['arguments'])==call['arguments']
         assert key not in json.dumps(captured[1])
+
+
+def test_unified_tool_approval_queue_only_shows_live_pending_calls(monkeypatch):
+    FakeClient.responses=[tool_reply(),final_reply()];monkeypatch.setattr(service.httpx,'AsyncClient',FakeClient)
+    with TestClient(service.app) as c:
+        assert c.get('/api/tool-approvals').status_code==401
+        setup(c);configure_budget(c);bot=c.post('/api/bots',json={'name':'Scout'}).json()['id']
+        run=c.post(f'/api/bots/{bot}/chat',json={'content':'Save a note'}).json()['job_id'];call=until_calls(c,run)[0]
+        queued=c.get('/api/tool-approvals').json();assert len(queued)==1 and queued[0]['id']==call['id'] and queued[0]['run_id']==run
+        assert queued[0]['arguments']==call['arguments']
+        assert c.post(f'/api/jobs/{run}/tool-calls/{call["id"]}/decision',json={'decision':'deny'}).status_code==200
+        get_events(c,run);assert c.get('/api/tool-approvals').json()==[]

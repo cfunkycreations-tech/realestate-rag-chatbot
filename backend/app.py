@@ -2038,6 +2038,22 @@ def job_tool_calls(job_id: str, request: Request):
     return calls
 
 
+@app.get('/api/tool-approvals')
+def pending_tool_approvals(request: Request):
+    require_auth(request)
+    with db() as c:
+        rows=c.execute("""SELECT tool_calls.* FROM tool_calls JOIN runs ON runs.id=tool_calls.run_id
+            WHERE tool_calls.status='pending' AND runs.status IN ('running','waiting_approval')
+            ORDER BY tool_calls.created_at,tool_calls.id LIMIT 100""").fetchall()
+        calls=[]
+        for row in rows:
+            call=dict(row);call['arguments']=json.loads(call['arguments']);call['result']=None
+            call['audit']=[dict(item) for item in c.execute('SELECT action,created_at FROM tool_audit WHERE call_id=? ORDER BY id',(call['id'],)).fetchall()]
+            # Review the exact persisted arguments that the tool will execute.
+            calls.append(call)
+    return calls
+
+
 @app.post('/api/jobs/{job_id}/tool-calls/{call_id}/decision')
 async def decide_tool_call(job_id: str, call_id: str, body: ToolDecisionIn, request: Request):
     require_auth(request)

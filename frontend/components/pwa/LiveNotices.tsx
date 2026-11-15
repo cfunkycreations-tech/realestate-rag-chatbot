@@ -1,0 +1,15 @@
+'use client';
+import {useEffect,useRef,useState} from 'react';
+import type {TeamBot} from '../team/TeamDashboard';
+type Event={id:number;bot_id:string|null;type:string;payload:Record<string,unknown>};
+type InstallEvent=Event & {prompt:()=>Promise<void>;userChoice:Promise<{outcome:string}>};
+export default function LiveNotices({enabled,bots,approvals,onInbox}:{enabled:boolean;bots:TeamBot[];approvals:number;onInbox:()=>void}){
+ const [notices,setNotices]=useState<{id:number;text:string}[]>([]),[installer,setInstaller]=useState<InstallEvent|null>(null),[installed,setInstalled]=useState(false);const botsRef=useRef(bots);useEffect(()=>{botsRef.current=bots},[bots]);
+ useEffect(()=>{if(!enabled)return;const ac=new AbortController();let timer:ReturnType<typeof setTimeout>,cursor=0,initialized=false;
+  async function poll(){try{if(!initialized){const res=await fetch('/api/team/overview?day_start=0',{signal:ac.signal});if(!res.ok)throw Error('Could not load activity');const data=await res.json();cursor=Math.max(0,...data.events.map((item:Event)=>item.id));initialized=true}else{const res=await fetch(`/api/events?since=${cursor}&limit=500`,{signal:ac.signal});if(!res.ok)throw Error('Could not load activity');const data=await res.json();cursor=data.next_cursor;const complete=data.events.filter((item:Event)=>item.type==='run.finished'&&item.payload.status==='done').map((item:Event)=>({id:item.id,text:`${botsRef.current.find(b=>b.id===item.bot_id)?.name||'Bot'} finished a response.`}));if(complete.length&&!ac.signal.aborted)setNotices(old=>[...old,...complete].slice(-5))}}catch{/* Notices are best effort; existing screens show their own errors. */}if(!ac.signal.aborted)timer=setTimeout(poll,3000)}void poll();return()=>{ac.abort();clearTimeout(timer)}
+ },[enabled]);
+ useEffect(()=>{if('serviceWorker' in navigator&&window.isSecureContext)void navigator.serviceWorker.register('/sw.js').catch(()=>{});function available(event:globalThis.Event){event.preventDefault();setInstaller(event as unknown as InstallEvent)}function installedHandler(){setInstalled(true);setInstaller(null)}window.addEventListener('beforeinstallprompt',available);window.addEventListener('appinstalled',installedHandler);return()=>{window.removeEventListener('beforeinstallprompt',available);window.removeEventListener('appinstalled',installedHandler)}},[]);
+ async function install(){if(!installer)return;await installer.prompt();await installer.userChoice;setInstaller(null)}
+ if(!enabled)return null;
+ return <div className="live-notices" aria-live="polite">{approvals>0&&<button className="live-notice" onClick={onInbox}>{approvals} {approvals===1?'item needs':'items need'} approval · Open Inbox</button>}{notices.map(notice=><div className="live-notice" key={notice.id}><span>{notice.text}</span><button aria-label="Dismiss notification" onClick={()=>setNotices(old=>old.filter(item=>item.id!==notice.id))}>×</button></div>)}{installer&&!installed&&<button className="live-notice" onClick={()=>void install()}>Install Funk Bot on this device</button>}</div>
+}
