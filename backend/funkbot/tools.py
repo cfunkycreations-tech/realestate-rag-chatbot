@@ -44,6 +44,12 @@ class FollowupArgs(BaseModel):
     due: str = Field(min_length=10,max_length=64,description='ISO 8601 datetime with explicit timezone offset, for example 2027-01-15T09:00:00-06:00.')
 
 
+class MissionArtifactArgs(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    name: str = Field(min_length=1,max_length=160,description='A descriptive .txt or .md file name, without directories.')
+    content: str = Field(min_length=1,max_length=12000,description='The exact UTF-8 text to save as an output of the current mission.')
+
+
 class HandoffArgs(BaseModel):
     model_config = ConfigDict(extra='forbid')
     to_bot_id: str = Field(min_length=1,max_length=128,description='Receiver ID from the available Bot catalog.')
@@ -70,6 +76,7 @@ class ToolSpec:
 
 
 REGISTRY = {
+    'attach_mission_result': ToolSpec('attach_mission_result', 'write', MissionArtifactArgs, 'Propose attaching a UTF-8 text result to the current mission. Each result requires explicit owner approval.'),
     'create_handoff': ToolSpec('create_handoff', 'send', HandoffArgs, 'Propose a mission handoff to another available Bot using its catalog ID, reason and context. Every handoff requires separate owner approval and may incur model charges.'),
     'mcp_call': ToolSpec('mcp_call', 'send', McpCallArgs, 'Call an explicitly allowlisted MCP connector tool. Every call requires owner approval. Use connector IDs and tool names from the system catalog.'),
     'web_fetch': ToolSpec('web_fetch', 'read', WebFetchArgs, 'Fetch text from an explicitly allowed public website.'),

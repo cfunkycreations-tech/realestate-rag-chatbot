@@ -923,6 +923,7 @@ class ToolPoliciesIn(BaseModel):
     write_note: Literal['ask','deny']
     create_followup: Literal['ask','deny']
     create_handoff: Literal['ask','deny'] | None = None
+    attach_mission_result: Literal['ask','deny'] | None = None
 
 
 def tool_policy_for(c,name,risk):
@@ -936,7 +937,7 @@ def tool_policy_for(c,name,risk):
 @app.get('/api/settings/tool-policies')
 def get_tool_policies(request: Request):
     require_auth(request)
-    with db() as c: return {name:tool_policy_for(c,name,risk) for name,risk in [('web_fetch','read'),('write_note','write'),('create_followup','write'),('create_handoff','send')]}
+    with db() as c: return {name:tool_policy_for(c,name,risk) for name,risk in [('web_fetch','read'),('write_note','write'),('create_followup','write'),('create_handoff','send'),('attach_mission_result','write')]}
 
 
 @app.put('/api/settings/tool-policies')
@@ -945,7 +946,8 @@ def put_tool_policies(body: ToolPoliciesIn,request: Request):
     with db() as c:
         c.execute('BEGIN IMMEDIATE')
         values=body.model_dump()
-        if values['create_handoff'] is None: values['create_handoff']=tool_policy_for(c,'create_handoff','send')
+        for name,risk in [('create_handoff','send'),('attach_mission_result','write')]:
+            if values[name] is None: values[name]=tool_policy_for(c,name,risk)
         c.execute("INSERT OR REPLACE INTO config VALUES ('tool_policies',?)",(json.dumps(values),))
     return values
 
@@ -1188,7 +1190,7 @@ def prompt_bound(messages, tool_definitions):
 
 def tool_event(job, item):
     kind=item['type']; values={key:value for key,value in item.items() if key!='type'}
-    requires_decision=(kind=='tool.proposed' and item['status']=='pending' and (item['tool'] in ('mcp_call','create_handoff') or item['tool'] not in job['tool_bridge'].context.run_grants))
+    requires_decision=(kind=='tool.proposed' and item['status']=='pending' and (item['tool'] in ('mcp_call','create_handoff','attach_mission_result') or item['tool'] not in job['tool_bridge'].context.run_grants))
     if kind=='tool.proposed': values['needs_decision']=requires_decision
     with db() as c:
         c.execute('BEGIN IMMEDIATE')
@@ -1207,7 +1209,7 @@ def tool_event(job, item):
 async def run_chat(job, bot, history, profile):
     entries=job.get('entries') or json.loads(config('profiles')).get(profile,[])
     messages=[{'role':'system','content':bot_system_prompt(bot)},*history]
-    tool_definitions=declarations(bool(bot.get('connector_catalog')),bool(bot.get('handoff_catalog'))) if 'id' in job and not job.get('lab_step_id') else []
+    tool_definitions=declarations(bool(bot.get('connector_catalog')),bool(bot.get('handoff_catalog')),bool(job.get('mission_id'))) if 'id' in job and not job.get('lab_step_id') else []
     complete_text=''
     try:
         for round_number in range(5):
@@ -1386,7 +1388,7 @@ async def start_chat(bot_id: str, body: ChatIn, mission_id: str | None = None, g
         if price:
             # Conservative byte estimate with protocol overhead, not a guarantee
             # for unknown tokenizers or gateways that add unreported tokens.
-            bound = prompt_bound([{'role':'system','content':bot_system_prompt(bot)},*history],[] if lab_step_id else declarations(bool(bot.get('connector_catalog')),bool(bot.get('handoff_catalog'))))
+            bound = prompt_bound([{'role':'system','content':bot_system_prompt(bot)},*history],[] if lab_step_id else declarations(bool(bot.get('connector_catalog')),bool(bot.get('handoff_catalog')),bool(mission_id)))
             if bound > price['max_prompt_tokens']:
                 raise HTTPException(400, 'Message and conversation exceed the configured prompt token safety bound for this profile.')
         try:
@@ -1412,7 +1414,7 @@ async def start_chat(bot_id: str, body: ChatIn, mission_id: str | None = None, g
             append_event(c, bot_id, job_id, 'message.sent', {'message_id':message_id, 'role':'user', 'summary':content[:240]})
     job={'id':job_id,'bot_id':bot_id,'done':False,'created':time.time(),'notify':asyncio.Event(),'entries':entries,'max_completion_tokens':price['max_completion_tokens'],'max_prompt_tokens':price['max_prompt_tokens'],'secrets':set(keys),'mission_id':mission_id,'group_managed':group_managed,'lab_step_id':lab_step_id,'user_message_id':message_id if not lab_step_id and not group_turn_id else None,'chat_id':chat_id,'group_turn_id':group_turn_id,'group_chat_id':group_chat_id,'group_role':group_role}; jobs[job_id]=job
     policy=WebPolicy.model_validate_json(config('web_policy','{}'))
-    context=ToolContext(db,DATA,job_id,bot_id,lambda text:redact_text(text,list(job['secrets'])),policy.allow,policy.deny,lambda _:None,policy_for=tool_policy_for,connector_info=connector_info,connector_call=execute_connector,handoff_catalog={item['id']:item['name'] for item in bot['handoff_catalog']},handoff_call=execute_handoff)
+    context=ToolContext(db,DATA,job_id,bot_id,lambda text:redact_text(text,list(job['secrets'])),policy.allow,policy.deny,lambda _:None,policy_for=tool_policy_for,connector_info=connector_info,connector_call=execute_connector,handoff_catalog={item['id']:item['name'] for item in bot['handoff_catalog']},handoff_call=execute_handoff,mission_id=mission_id,artifact_call=execute_mission_artifact)
     job['tool_bridge']=ToolBridge(context,lambda item:tool_event(job,item))
     job['task']=asyncio.create_task(run_chat(job,bot,history,body.profile or bot['profile']))
     def finish_unexpected(task):
@@ -2638,6 +2640,105 @@ def project_file(project_id: str, bot_id: str, filename: str, request: Request):
     finally: os.close(directory)
 
 
+# Artifact files are inert database snapshots, not filesystem paths or model instructions.
+MAX_WORK_ARTIFACT=2*1024*1024
+MAX_WORK_TOTAL=50*1024*1024
+
+
+def artifact_name(value):
+    name=value.strip()
+    if not name or len(name)>160 or name in ('.','..') or '/' in name or '\\' in name or any(ord(ch)<32 or ord(ch)==127 for ch in name):
+        raise ValueError('Use a plain filename without directories or control characters.')
+    return name
+
+
+def insert_artifact(c, scope, scope_id, name, data, bot_id=None, run_id=None):
+    if scope not in ('mission','project'): raise ValueError('Invalid artifact scope.')
+    if not c.execute('SELECT 1 FROM '+('missions' if scope=='mission' else 'projects')+' WHERE id=?',(scope_id,)).fetchone():
+        raise ValueError('Mission or project no longer exists.')
+    if c.execute('SELECT count(*) FROM work_artifacts WHERE '+scope+'_id=?',(scope_id,)).fetchone()[0]>=100:
+        raise ValueError('At most 100 files per mission or project.')
+    if c.execute('SELECT COALESCE(SUM(length(data)),0) FROM work_artifacts').fetchone()[0]+len(data)>MAX_WORK_TOTAL:
+        raise ValueError('Work artifact storage limit reached (50 MB).')
+    item=str(uuid.uuid4())
+    c.execute('INSERT INTO work_artifacts VALUES (?,?,?,?,?,?,?,?)',(item,scope_id if scope=='mission' else None,scope_id if scope=='project' else None,bot_id,run_id,name,data,time.time()))
+    return item
+
+
+async def execute_mission_artifact(context, body):
+    from funkbot.tool_runtime import live
+    try:
+        name=artifact_name(body.name)
+        if Path(name).suffix.lower() not in ('.txt','.md'): raise ValueError('Bot results must use .txt or .md filenames.')
+        if not body.content.strip() or '\x00' in body.content: raise ValueError('Result text must not be empty or contain NUL characters.')
+        data=body.content.encode('utf-8')
+        if len(data)>MAX_WORK_ARTIFACT: raise ValueError('Result is too large.')
+        with context.db() as c:
+            c.execute('BEGIN IMMEDIATE');live(c,context)
+            if not c.execute("SELECT 1 FROM mission_runs mr JOIN missions m ON m.id=mr.mission_id WHERE mr.mission_id=? AND mr.run_id=? AND mr.bot_id=? AND mr.status IN ('running','waiting_approval') AND m.status IN ('running','waiting_approval')",(context.mission_id,context.run_id,context.bot_id)).fetchone(): raise ValueError('The mission run is no longer active.')
+            paused=c.execute("SELECT value FROM config WHERE key='global_pause'").fetchone()
+            if paused and paused['value']=='1': raise ValueError('All Bots are paused.')
+            item=insert_artifact(c,'mission',context.mission_id,name,data,context.bot_id,context.run_id)
+        return {'id':item,'name':name,'size':len(data),'mission_id':context.mission_id}
+    except ValueError as exc: raise ToolError(str(exc)) from exc
+
+
+
+def artifact_scope(scope):
+    if scope not in ('missions','projects'): raise HTTPException(404,'Not found.')
+    return 'mission' if scope=='missions' else 'project'
+
+
+def artifact_visible_sql(scope):
+    return 'a.mission_id=?' if scope=='mission' else '(a.project_id=? OR a.mission_id IN (SELECT mission_id FROM project_missions WHERE project_id=?))'
+
+
+def artifact_scope_params(scope, identifier): return (identifier,) if scope=='mission' else (identifier,identifier)
+
+
+@app.get('/api/{scope}/{identifier}/artifacts')
+def list_work_artifacts(scope: str,identifier: str,request: Request):
+    require_auth(request);kind=artifact_scope(scope);keys=configured_secrets()
+    with db() as c:
+        if not c.execute('SELECT 1 FROM '+scope+' WHERE id=?',(identifier,)).fetchone(): raise HTTPException(404,'Mission or project not found.')
+        rows=c.execute('SELECT a.id,a.mission_id,a.project_id,a.bot_id,a.run_id,a.name,length(a.data) size,a.created_at FROM work_artifacts a WHERE '+artifact_visible_sql(kind)+' ORDER BY a.created_at,a.id',artifact_scope_params(kind,identifier)).fetchall()
+    return [{**dict(row),'name':redact_text(row['name'],keys)} for row in rows]
+
+
+@app.post('/api/{scope}/{identifier}/artifacts')
+async def upload_work_artifact(scope: str,identifier: str,request: Request,file: UploadFile=File(...)):
+    require_auth(request);kind=artifact_scope(scope)
+    try: name=artifact_name(file.filename or '')
+    except ValueError as exc: raise HTTPException(400,str(exc)) from exc
+    name=redact_text(name,configured_secrets())
+    data=await file.read(MAX_WORK_ARTIFACT+1)
+    if not data or len(data)>MAX_WORK_ARTIFACT: raise HTTPException(400,'Files must be between 1 byte and 2 MB.')
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        try: item=insert_artifact(c,kind,identifier,name,data)
+        except ValueError as exc: raise HTTPException(400,str(exc)) from exc
+    return {'id':item,'name':name,'size':len(data)}
+
+
+@app.get('/api/{scope}/{identifier}/artifacts/{artifact_id}')
+def download_work_artifact(scope: str,identifier: str,artifact_id: str,request: Request):
+    require_auth(request);kind=artifact_scope(scope)
+    with db() as c:
+        row=c.execute('SELECT a.name,a.data FROM work_artifacts a WHERE a.id=? AND '+artifact_visible_sql(kind),(artifact_id,*artifact_scope_params(kind,identifier))).fetchone()
+        if not row: raise HTTPException(404,'File not found.')
+    name=redact_text(row['name'],configured_secrets())
+    return Response(content=row['data'],media_type='application/octet-stream',headers={'Content-Disposition':"attachment; filename*=UTF-8''"+quote(name,safe=''),'X-Content-Type-Options':'nosniff','Cache-Control':'no-store','Content-Security-Policy':"default-src 'none'; sandbox"})
+
+
+@app.delete('/api/{scope}/{identifier}/artifacts/{artifact_id}')
+def delete_work_artifact(scope: str,identifier: str,artifact_id: str,request: Request):
+    require_auth(request);kind=artifact_scope(scope)
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        if not c.execute('DELETE FROM work_artifacts WHERE id=? AND '+kind+'_id=?',(artifact_id,identifier)).rowcount: raise HTTPException(404,'File not found in this '+kind+'.')
+    return {'deleted':True}
+
+
 @app.get('/api/bots/{bot_id}/latest-run')
 def latest_run(bot_id: str, request: Request):
     require_auth(request)
@@ -2783,7 +2884,7 @@ async def decide_tool_call(job_id: str, call_id: str, body: ToolDecisionIn, requ
         require_unpaused(c)
         row=c.execute('SELECT tool_calls.status,tool_calls.tool_name, runs.status AS run_status FROM tool_calls JOIN runs ON runs.id=tool_calls.run_id WHERE tool_calls.id=? AND tool_calls.run_id=?',(call_id,job_id)).fetchone()
     if not row: raise HTTPException(404,'Tool call not found.')
-    if row['tool_name'] in ('mcp_call','create_handoff') and body.decision=='approve': raise HTTPException(400,'Connector calls and handoffs must be approved individually.')
+    if row['tool_name'] in ('mcp_call','create_handoff','attach_mission_result') and body.decision=='approve': raise HTTPException(400,'Connector calls, handoffs and mission attachments must be approved individually.')
     bridge=jobs.get(job_id,{}).get('tool_bridge')
     if row['status']!='pending' or row['run_status'] not in ACTIVE_STATUSES or bridge is None:
         raise HTTPException(409,'This approval is no longer pending.')

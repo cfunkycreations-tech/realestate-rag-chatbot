@@ -27,6 +27,8 @@ class ToolContext:
     connector_call: Callable = None
     handoff_catalog: dict = field(default_factory=dict)
     handoff_call: Callable = None
+    mission_id: str | None = None
+    artifact_call: Callable = None
 
 
 def live(c, context):
@@ -57,6 +59,10 @@ async def execute(context: ToolContext, name: str, args: dict, wait_decision):
             connector=context.connector_info(c,parsed.connector_id)
             args={**parsed.model_dump(),'arguments_json':json.dumps(arguments,ensure_ascii=False),'endpoint':connector['url'] if connector else '', 'connector_revision':connector['revision'] if connector else ''}
             if not connector or not connector.get('enabled') or parsed.tool_name not in connector.get('allowed_tools',[]): policy='deny'
+        if name=='attach_mission_result':
+            parsed=tools.MissionArtifactArgs.model_validate(args)
+            args={**parsed.model_dump(),'name':parsed.name.strip()}
+            if not context.mission_id or not context.artifact_call: policy='deny'
         if name=='create_handoff':
             parsed=tools.HandoffArgs.model_validate(args)
             receiver=c.execute('SELECT name FROM bots WHERE id=?',(parsed.to_bot_id,)).fetchone()
@@ -71,7 +77,7 @@ async def execute(context: ToolContext, name: str, args: dict, wait_decision):
             context.notify({'type':'tool.decision','call_id':call,'decision':'policy_denied','status':'denied'})
             return {'status':'denied','message':'The owner tool policy denied this call.'}
         if row['status']=='pending':
-            granted=name not in ('mcp_call','create_handoff') and name in context.run_grants
+            granted=name not in ('mcp_call','create_handoff','attach_mission_result') and name in context.run_grants
             decision='run_grant' if granted else await wait_decision(call)
             with context.db() as c:
                 c.execute('BEGIN IMMEDIATE');live(c,context)
@@ -81,7 +87,7 @@ async def execute(context: ToolContext, name: str, args: dict, wait_decision):
                     tool_audit.approve_from_run_grant(c,call);status='approved'
                 else:
                     status=tool_audit.decide(c,call,decision)
-            if not granted and decision=='approve' and name not in ('mcp_call','create_handoff'): context.run_grants.add(name)
+            if not granted and decision=='approve' and name not in ('mcp_call','create_handoff','attach_mission_result'): context.run_grants.add(name)
             context.notify({'type':'tool.decision','call_id':call,'decision':decision,'status':status})
             if status=='denied': return {'status':'denied','message':'The owner denied this tool call.'}
         with context.db() as c:
@@ -105,6 +111,9 @@ async def execute(context: ToolContext, name: str, args: dict, wait_decision):
             if name=='mcp_call':
                 if not context.connector_call: raise tools.ToolError('Connector execution is unavailable.')
                 result=await context.connector_call(connector,tools.McpCallArgs.model_validate(safe_args))
+            elif name=='attach_mission_result':
+                if not context.mission_id or not context.artifact_call: raise tools.ToolError('Mission result attachments are unavailable.')
+                result=await context.artifact_call(context,tools.MissionArtifactArgs.model_validate(safe_args))
             elif name=='create_handoff':
                 if not context.handoff_call: raise tools.ToolError('Handoffs are unavailable.')
                 result=await context.handoff_call(context,tools.HandoffArgs.model_validate(safe_args))

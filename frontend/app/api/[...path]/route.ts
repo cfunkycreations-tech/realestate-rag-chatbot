@@ -14,7 +14,7 @@ async function proxy(request: NextRequest, {params}: {params: Promise<{path: str
   try {
     let body: ArrayBuffer | undefined;
     if (!['GET', 'HEAD'].includes(request.method)) {
-      if (request.method === 'POST' && request.body && ((path.length === 5 && path[0] === 'bots' && path[2] === 'chats' && path[4] === 'attachments') || (path.length === 2 && path[0] === 'workspace' && path[1] === 'restore'))) {
+      if (request.method === 'POST' && request.body && ((path.length === 5 && path[0] === 'bots' && path[2] === 'chats' && path[4] === 'attachments') || (path.length === 2 && path[0] === 'workspace' && path[1] === 'restore') || (path.length === 3 && ['missions','projects'].includes(path[0]) && path[2] === 'artifacts'))) {
         const maxBytes=path[0]==='workspace'?260*1024*1024:2*1024*1024+65536;
         // Bound multipart buffering at the public proxy even without Content-Length.
         const reader=request.body.getReader(), chunks:Uint8Array[]=[];let total=0;
