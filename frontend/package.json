@@ -35,7 +35,8 @@
     "test:backup": "node scripts/backup-e2e.mjs",
     "test:group-chats": "node scripts/group-chats-e2e.mjs",
     "test:connectors": "node scripts/connectors-e2e.mjs",
-    "test:chat-memory": "node scripts/chat-memory-e2e.mjs"
+    "test:chat-memory": "node scripts/chat-memory-e2e.mjs",
+    "test:restore-one-click": "node scripts/restore-one-click-e2e.mjs"
   },
   "dependencies": {
     "@tanstack/react-virtual": "^3.14.26",

@@ -39,7 +39,8 @@ from funkbot.redaction import SlidingRedactor, redact_text
 from funkbot.memory_capture import capture as capture_memory, normalized as normalized_memory, is_command as is_memory_command, parse_command as parse_memory_command
 from funkbot.skills import parse_invocation, parse_markdown
 from funkbot.schedule import next_occurrence
-from funkbot.backup import create as create_backup, restore as stage_restore, BackupError, MAX_TOTAL as MAX_BACKUP_TOTAL
+from funkbot.backup import create as create_backup, restore as stage_restore, validate_stage, BackupError, MAX_TOTAL as MAX_BACKUP_TOTAL
+from funkbot import workspace_pointer
 from alembic.config import Config as AlembicConfig
 from alembic.script import ScriptDirectory
 from funkbot.vault import MAX_ARCHIVE, VaultError, character_for_bot, draw_character, import_zip
@@ -52,8 +53,10 @@ from funkbot.tool_runtime import ToolContext
 from funkbot.tool_bridge import ToolBridge
 from funkbot.tool_protocol import CallAccumulator, declarations
 
-DATA = Path(os.environ.get('FUNK_DATA_DIR', Path(__file__).parent.parent / 'data'))
-DATA.mkdir(parents=True, exist_ok=True)
+DATA_ROOT = Path(os.environ.get('FUNK_DATA_DIR', Path(__file__).parent.parent / 'data')).resolve()
+DATA_ROOT.mkdir(parents=True, exist_ok=True)
+_workspace_pointer = workspace_pointer.read(DATA_ROOT)
+DATA = workspace_pointer.resolve(DATA_ROOT, _workspace_pointer['active'])
 
 def get_or_create_key(name, factory):
     path = DATA / name
@@ -143,6 +146,85 @@ mission_tasks = {}
 lab_tasks = {}
 group_chat_tasks = {}
 
+# Single-worker quiescence: block new HTTP work while waiting for already
+# accepted handlers to finish before switching the persistent workspace.
+_switching_workspace = False
+_http_handlers = 0
+
+
+@app.middleware('http')
+async def workspace_switch_guard(request: Request, call_next):
+    global _http_handlers
+    if _switching_workspace:
+        return Response('Workspace is restarting.',status_code=503,headers={'Retry-After':'2','Cache-Control':'no-store'})
+    _http_handlers+=1
+    try: return await call_next(request)
+    finally: _http_handlers-=1
+
+
+async def restart_for_workspace():
+    # Let the successful HTTP response flush before replacing this process.
+    await asyncio.sleep(1)
+    try: os.execv(sys.executable,[sys.executable,*sys.orig_argv[1:]])
+    except Exception:
+        logging.getLogger('uvicorn.error').exception('Workspace activation is pending; restart the backend manually.')
+
+
+def migration_revisions():
+    cfg=AlembicConfig();cfg.set_main_option('script_location',str(Path(__file__).parent/'funkbot'/'migrations'))
+    script=ScriptDirectory.from_config(cfg);head=script.get_current_head()
+    return head,[revision.revision for revision in script.walk_revisions() if revision.revision!=head]
+
+
+async def activate_workspace(stage):
+    global _switching_workspace
+    if os.environ.get('FUNK_ENABLE_RESTORE_RESTART')!='1': raise HTTPException(503,'Automatic restore restart is disabled for this backend.')
+    if os.environ.get('FUNK_SESSION_SECRET'): raise HTTPException(409,'Remove FUNK_SESSION_SECRET and restart before automatic restore; restored sessions must be invalidated.')
+    if _switching_workspace: raise HTTPException(409,'A workspace switch is already in progress.')
+    _switching_workspace=True
+    write_attempted=False;relative=None
+    try:
+        # This handler counts itself; reject concurrent owner changes rather
+        # than silently losing them during the switch. Streams can finish, but
+        # no active Bot work or newly admitted handlers may write to the old DB.
+        deadline=time.monotonic()+10
+        while _http_handlers>1:
+            if time.monotonic()>=deadline: raise HTTPException(409,'Other requests are still running. Try the restore again.')
+            await asyncio.sleep(.02)
+        if config('global_pause','0')!='1' or any(not job.get('done') for job in jobs.values()): raise HTTPException(409,'Pause all Bots and wait for active work to stop.')
+        pointer=workspace_pointer.read(DATA_ROOT)
+        if workspace_pointer.resolve(DATA_ROOT,pointer['active'])!=DATA: raise HTTPException(409,'Active workspace changed; restart the backend.')
+        relative=(pointer['active']+'/' if pointer['active'] else '')+'restores/'+stage.name
+        if workspace_pointer.resolve(DATA_ROOT,relative)!=stage: raise HTTPException(400,'Invalid restore stage.')
+        head,ancestors=migration_revisions()
+        validate_stage(stage,head,ancestors)
+        # A restored scheduler must never start unattended; old browser
+        # sessions must not authenticate to a potentially different account.
+        with session(stage/'funk.db') as c:
+            c.execute('BEGIN IMMEDIATE')
+            c.execute("INSERT OR REPLACE INTO config VALUES ('global_pause','1')")
+        new_key=stage/('.session-'+str(uuid.uuid4()))
+        try:
+            fd=os.open(new_key,os.O_WRONLY|os.O_CREAT|os.O_EXCL|getattr(os,'O_NOFOLLOW',0),0o600)
+            with os.fdopen(fd,'w') as f:
+                f.write(secrets.token_urlsafe(48));f.flush();os.fsync(f.fileno())
+            os.replace(new_key,stage/'session.key')
+        finally: new_key.unlink(missing_ok=True)
+        write_attempted=True
+        workspace_pointer.write(DATA_ROOT,relative,pointer['active'])
+        asyncio.create_task(restart_for_workspace())
+    except HTTPException:
+        _switching_workspace=False;raise
+    except Exception as exc:
+        if write_attempted:
+            try: committed=workspace_pointer.read(DATA_ROOT)['active']==relative
+            except Exception: committed=True  # Corrupt or unreadable pointer: fail closed.
+            if committed:
+                asyncio.create_task(restart_for_workspace())
+                raise HTTPException(503,'Workspace pointer may have changed. Restart the backend before continuing.') from exc
+        _switching_workspace=False
+        raise HTTPException(400,'Could not safely activate this restored workspace.') from exc
+
 
 def require_unpaused(c):
     row=c.execute("SELECT value FROM config WHERE key='global_pause'").fetchone()
@@ -201,8 +283,10 @@ def download_workspace_backup(request: Request):
 
 
 @app.post('/api/workspace/restore')
-async def upload_workspace_restore(request: Request):
+async def upload_workspace_restore(request: Request, activate: bool = False):
     require_auth(request)
+    if activate and os.environ.get('FUNK_ENABLE_RESTORE_RESTART')!='1': raise HTTPException(503,'Automatic restore restart is disabled for this backend.')
+    if activate and os.environ.get('FUNK_SESSION_SECRET'): raise HTTPException(409,'Remove FUNK_SESSION_SECRET and restart before automatic restore; restored sessions must be invalidated.')
     if config('global_pause','0')!='1': raise HTTPException(409,'Pause all Bots before staging a restore.')
     if any(not job.get('done') for job in jobs.values()): raise HTTPException(409,'Wait for active responses to stop.')
     if request.headers.get('content-type','').split(';',1)[0].strip().lower()!='application/zip': raise HTTPException(415,'Upload a ZIP backup.')
@@ -213,12 +297,32 @@ async def upload_workspace_restore(request: Request):
                 size+=len(chunk)
                 if size>MAX_BACKUP_TOTAL+4*1024*1024: raise HTTPException(413,'Backup is too large.')
                 target.write(chunk)
-        cfg=AlembicConfig();cfg.set_main_option('script_location',str(Path(__file__).parent/'funkbot'/'migrations'))
-        script=ScriptDirectory.from_config(cfg);head=script.get_current_head()
-        ancestors=[revision.revision for revision in script.walk_revisions() if revision.revision!=head]
+        head,ancestors=migration_revisions()
         try: result=stage_restore(path,DATA,head,ancestors)
         except BackupError as exc: raise HTTPException(400,str(exc)) from exc
+    if activate:
+        await activate_workspace(result)
+        return {'staged_id':result.name,'activated':True,'restarting':True}
     return {'staged_id':result.name,'restart_required':True}
+
+
+@app.get('/api/workspace/restore-status')
+def workspace_restore_status(request: Request):
+    require_auth(request)
+    return {'automatic':os.environ.get('FUNK_ENABLE_RESTORE_RESTART')=='1' and not os.environ.get('FUNK_SESSION_SECRET'),
+            'active':_workspace_pointer['active'],'previous':_workspace_pointer['previous']}
+
+
+@app.post('/api/workspace/restore/{stage_id}/activate')
+async def activate_staged_workspace(stage_id: str, request: Request):
+    require_auth(request)
+    try:
+        if str(uuid.UUID(stage_id))!=stage_id: raise ValueError()
+    except ValueError: raise HTTPException(404,'Restore stage not found.')
+    stage=DATA/'restores'/stage_id
+    if stage.is_symlink() or not stage.is_dir(): raise HTTPException(404,'Restore stage not found.')
+    await activate_workspace(stage)
+    return {'activated':True,'restarting':True}
 
 
 @app.get('/api/workspace/restores')

@@ -127,30 +127,51 @@ def restore(archive_path: Path, data: Path, expected_revision: str, older_revisi
                         if count>entry.file_size: raise BackupError('Invalid backup file size.')
                         digest.update(chunk);out.write(chunk)
                 if count!=entry.file_size or digest.hexdigest()!=spec['sha256']: raise BackupError('Backup checksum failed.')
-        key=Fernet((stage/'vault.key').read_bytes().strip())
-        if not (stage/'session.key').read_text().strip(): raise BackupError('Invalid session key.')
-        with closing(sqlite3.connect((stage/'funk.db').resolve().as_uri()+'?mode=ro',uri=True)) as db:
-            db.execute('PRAGMA trusted_schema=OFF')
-            if db.execute('PRAGMA quick_check').fetchone()[0]!='ok' or db.execute('PRAGMA foreign_key_check').fetchone(): raise BackupError('Backup database is invalid.')
-            revisions=db.execute('SELECT version_num FROM alembic_version').fetchall()
-            if len(revisions)!=1 or revisions[0][0] not in {expected_revision,*older_revisions}: raise BackupError('Backup version is not compatible with this Funk Bot version.')
-            revision=revisions[0][0]
-            row=db.execute("SELECT value FROM config WHERE key='gateways'").fetchone()
-            gateways=json.loads(row[0]) if row else {}
-            if not isinstance(gateways,dict) or any(not isinstance(g,dict) for g in gateways.values()): raise BackupError('Invalid gateway configuration.')
-            for gateway in gateways.values():
-                if gateway.get('key'): key.decrypt(gateway['key'].encode())
-            row=db.execute("SELECT value FROM config WHERE key='mcp_connectors'").fetchone()
-            connectors=json.loads(row[0]) if row else {}
-            if not isinstance(connectors,dict) or any(not isinstance(g,dict) for g in connectors.values()): raise BackupError('Invalid connector configuration.')
-            for connector in connectors.values():
-                if connector.get('key'): key.decrypt(connector['key'].encode())
-        if revision!=expected_revision:
-            # Migrate only the isolated staged copy, never the active database.
-            from funkbot.database import migrate
-            migrate(stage/'funk.db')
+        validate_stage(stage, expected_revision, older_revisions)
         return stage
     except Exception as exc:
         shutil.rmtree(stage,ignore_errors=True)
         if isinstance(exc,BackupError): raise
         raise BackupError('Invalid or damaged workspace backup.') from exc
+
+
+def validate_stage(stage: Path, expected_revision: str, older_revisions=()):
+    """Revalidate a stage immediately before activation, migrating only that stage."""
+    # Refuse links and special files on revalidation, including fixed files.
+    for name in ('funk.db','vault.key','session.key'):
+        path=stage/name
+        if path.is_symlink() or not path.is_file(): raise BackupError('Unsafe staged workspace file.')
+    for name in ('funk.db-wal','funk.db-shm'):
+        path=stage/name
+        if path.is_symlink() or (path.exists() and not path.is_file()): raise BackupError('Unsafe staged database journal.')
+    entries=list(_files(stage))
+    if len(entries)+1>MAX_FILES: raise BackupError('Workspace contains too many files.')
+    total=(stage/'funk.db').stat().st_size
+    if total>MAX_TOTAL: raise BackupError('Workspace exceeds the backup size limit.')
+    for _,path in entries:
+        info=path.lstat()
+        if not stat.S_ISREG(info.st_mode): raise BackupError('Workspace contains a non-regular file.')
+        total+=info.st_size
+        if total>MAX_TOTAL: raise BackupError('Workspace exceeds the backup size limit.')
+    key=Fernet((stage/'vault.key').read_bytes().strip())
+    if not (stage/'session.key').read_text().strip(): raise BackupError('Invalid session key.')
+    with closing(sqlite3.connect((stage/'funk.db').resolve().as_uri()+'?mode=ro',uri=True)) as db:
+        db.execute('PRAGMA trusted_schema=OFF')
+        if db.execute('PRAGMA quick_check').fetchone()[0]!='ok' or db.execute('PRAGMA foreign_key_check').fetchone(): raise BackupError('Backup database is invalid.')
+        revisions=db.execute('SELECT version_num FROM alembic_version').fetchall()
+        if len(revisions)!=1 or revisions[0][0] not in {expected_revision,*older_revisions}: raise BackupError('Backup version is not compatible with this Funk Bot version.')
+        revision=revisions[0][0]
+        row=db.execute("SELECT value FROM config WHERE key='gateways'").fetchone()
+        gateways=json.loads(row[0]) if row else {}
+        if not isinstance(gateways,dict) or any(not isinstance(g,dict) for g in gateways.values()): raise BackupError('Invalid gateway configuration.')
+        for gateway in gateways.values():
+            if gateway.get('key'): key.decrypt(gateway['key'].encode())
+        row=db.execute("SELECT value FROM config WHERE key='mcp_connectors'").fetchone()
+        connectors=json.loads(row[0]) if row else {}
+        if not isinstance(connectors,dict) or any(not isinstance(g,dict) for g in connectors.values()): raise BackupError('Invalid connector configuration.')
+        for connector in connectors.values():
+            if connector.get('key'): key.decrypt(connector['key'].encode())
+    if revision!=expected_revision:
+        # Migrate only the isolated staged copy, never the active database.
+        from funkbot.database import migrate
+        migrate(stage/'funk.db')
