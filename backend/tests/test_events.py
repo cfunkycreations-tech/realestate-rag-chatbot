@@ -44,3 +44,27 @@ def test_failed_run_emits_error_event(monkeypatch):
         events=client.get('/api/events').json()['events']
         assert events[-2]['type']=='error.raised'
         assert events[-1]['type']=='run.finished' and events[-1]['payload']['status']=='failed'
+
+
+def test_event_export_auth_streaming_redaction_csv_safety_and_bot_scope():
+    import csv,io
+    with TestClient(service.app) as client:
+        assert client.get('/api/events/export').status_code==401
+        setup(client)
+        one=client.post('/api/bots',json={'name':'One'}).json()['id']
+        two=client.post('/api/bots',json={'name':'Two'}).json()['id']
+        # Old stored events must be re-redacted if a secret is configured later.
+        with service.db() as db:
+            service.append_event(db,one,None,'message.sent',{'message_id':'=1+1','role':'user','summary':'Late private-key-abcdefgh12345'})
+            service.append_event(db,two,None,'run.started',{'status':'running'})
+        client.put('/api/settings/gateways/openrouter',json={'url':'https://example.com/v1','key':'private-key-abcdefgh12345'})
+        response=client.get('/api/events/export?format=json&bot_id='+one)
+        assert response.status_code==200 and response.headers['cache-control']=='no-store'
+        assert 'private-key' not in response.text
+        data=response.json();assert len(data)==1 and data[0]['bot_id']==one and '[redacted]' in data[0]['payload']['summary']
+        result=client.get('/api/events/export?format=csv')
+        assert result.status_code==200 and 'private-key' not in result.text
+        rows=list(csv.DictReader(io.StringIO(result.text)));assert len(rows)==2 and rows[0]['type']=='message.sent'
+        assert service.csv_safe(' =2+2').startswith("'")
+        assert service.csv_safe('\ttext').startswith("'")
+        assert client.get('/api/events/export?format=xml').status_code==422

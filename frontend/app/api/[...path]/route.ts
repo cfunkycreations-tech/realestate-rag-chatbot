@@ -14,7 +14,7 @@ async function proxy(request: NextRequest, {params}: {params: Promise<{path: str
   try {
     const result = await fetch(url, {method: request.method, headers, body: ['GET', 'HEAD'].includes(request.method) ? undefined : await request.arrayBuffer(), redirect: 'manual', cache: 'no-store'});
     const outgoing = new Headers();
-    for (const name of ['content-type', 'cache-control', 'set-cookie', 'x-accel-buffering']) {
+    for (const name of ['content-type', 'content-disposition', 'cache-control', 'set-cookie', 'x-accel-buffering', 'x-content-type-options']) {
       const value = result.headers.get(name);
       if (value) outgoing.set(name, value);
     }

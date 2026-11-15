@@ -1675,6 +1675,46 @@ def export_analytics(request: Request, start: str, end: str):
     return Response(stream.getvalue(),media_type='text/csv',headers={'Content-Disposition':'attachment; filename="funk-bot-analytics.csv"'})
 
 
+def redact_event_value(value, keys):
+    if isinstance(value,str): return redact_text(value,keys)
+    if isinstance(value,list): return [redact_event_value(item,keys) for item in value]
+    if isinstance(value,dict): return {key:redact_event_value(item,keys) for key,item in value.items()}
+    return value
+
+
+def csv_safe(value):
+    if isinstance(value,str) and (value.startswith(('\t','\r','\n')) or value.lstrip().startswith(('=','+','-','@'))):
+        return "'"+value
+    return value
+
+
+@app.get('/api/events/export')
+def export_events(request: Request, format: Literal['json','csv']='json', bot_id: str | None = Query(default=None,max_length=128)):
+    require_auth(request)
+    keys=configured_secrets()
+    def stream():
+        with db() as c:
+            rows=c.execute('SELECT id,bot_id,run_id,event_type,payload,created_at FROM events WHERE (? IS NULL OR bot_id=?) ORDER BY id',(bot_id,bot_id))
+            if format=='json':
+                yield '['
+                first=True
+                for row in rows:
+                    event=redact_event_value(row_to_event(row).model_dump(),keys)
+                    yield ('' if first else ',')+json.dumps(event,ensure_ascii=False)
+                    first=False
+                yield ']'
+            else:
+                fields=['id','bot_id','run_id','type','payload','created_at']
+                buffer=io.StringIO(newline='');writer=csv.DictWriter(buffer,fieldnames=fields,lineterminator='\r\n')
+                writer.writeheader();yield buffer.getvalue();buffer.seek(0);buffer.truncate(0)
+                for row in rows:
+                    event=redact_event_value(row_to_event(row).model_dump(),keys)
+                    event['payload']=json.dumps(event['payload'],ensure_ascii=False)
+                    writer.writerow({key:csv_safe(value) for key,value in event.items()})
+                    yield buffer.getvalue();buffer.seek(0);buffer.truncate(0)
+    return StreamingResponse(stream(),media_type='application/json' if format=='json' else 'text/csv',headers={'Content-Disposition':f'attachment; filename="funk-bot-events.{format}"','Cache-Control':'no-store','X-Content-Type-Options':'nosniff'})
+
+
 @app.get('/api/events', response_model=EventPage)
 def account_events(request: Request, since: int = Query(default=0, ge=0), limit: int = Query(default=100, ge=1, le=500)):
     require_auth(request)

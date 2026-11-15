@@ -1,6 +1,6 @@
 # Funk Bot
 
-Funk Bot is a local-first personal assistant workspace. This repository is a **partial implementation**, not the full persistent-agent platform: it provides password-protected, persistent Bot identities and conversations, configurable OpenAI-compatible gateways, model-profile fallback, and reported token usage. It provides two limited audited tools, single-Bot missions and chief-led group missions, but not a computer, autonomous routines, or semantic memory. Do not use it for unattended work or assume it has the safety controls of a complete agent runtime.
+Funk Bot is a local-first personal assistant workspace. This repository is a **partial implementation**, not the full persistent-agent platform: it provides password-protected, persistent Bot identities and conversations, configurable OpenAI-compatible gateways, model-profile fallback, and reported token usage. It provides two limited audited tools, single-Bot missions and chief-led group missions, but not a computer, autonomous routines, or semantic memory. Do not use it for unattended work or assume it has the safety controls of a complete agent runtime. Optional computer-use access to your local machine is not built.
 
 ## Quickstart (Docker Desktop)
 
@@ -216,3 +216,7 @@ Open **Settings → Budget** to set caps and profile prices. The account and eac
 - Vault encryption protects database contents from casual inspection, but its key is stored alongside the data on the same host. Protect filesystem access and backups. Messages and provider output are redacted for saved gateway keys and common key patterns; no redaction is perfect.
 - The authenticated `/api/events?since=0` endpoint exposes cursor-ordered run starts, message summaries, state changes, errors, and finishes recorded after this upgrade. Existing slice-2 events remain in per-run history and are not backfilled. Deleting a Bot deletes its event history. This is not a complete audit log. Beyond the two tools described above, no general search or file access, MCP, scheduler, webhook, sandbox, notifications, PWA, export, or browser/computer features are provided. The UI intentionally does not advertise those as working.
 - Provider names and defaults are configuration examples, not a guarantee that models are currently available. A working account/key and gateway configuration are required for live inference.
+
+### Event export
+
+In **Settings → Tool audit**, export the recorded account event log as JSON or CSV. The authenticated export streams in event order and reapplies known-secret filtering, but no filter is complete. Exports are private and may include message summaries. CSV cells that resemble spreadsheet formulas are prefixed for safety. This is an event export, not a complete tool-audit export or workspace backup. Deleting a Bot deletes its event history.
