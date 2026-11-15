@@ -45,23 +45,27 @@ export function projectOffice(bots:OfficeBot[],events:OfficeEvent[],now:number):
     const current=positionAt(c.motion,at),start={x:Math.round(current.x),y:Math.round(current.y)};
     c.motion={path:pathfind(start,target,blocked),at};
   };
+  const meetings=new Map<string,Set<string>>();
   for(const e of events){
     const at=e.created_at*1000;if(at>now)continue;
     if(e.type==='group.session_started'||e.type==='group.session_ended'){
       const ids=Array.isArray(e.payload.participants)?e.payload.participants:[];
       ids.forEach((id,seatIndex)=>{if(typeof id!=='string')return;const found=byId.get(id);if(!found)return;
-        found.character.state=e.type==='group.session_started'?'meeting':'idle';
-        move(found.character,e.type==='group.session_started'?seat(seatIndex):desk(found.index),at);
+        const session=String(e.payload.mission_id||'demo'),active=meetings.get(id)||new Set<string>();
+        if(e.type==='group.session_started')active.add(session);else active.delete(session);
+        meetings.set(id,active);found.character.state=active.size?'meeting':'idle';
+        move(found.character,active.size?seat(seatIndex):desk(found.index),at);
       });continue;
     }
     if(!e.bot_id)continue;
     const found=byId.get(e.bot_id);if(!found)continue;
     const c=found.character;
     if(e.type==='bot.state_changed'&&typeof e.payload.state==='string'){
-      c.state=e.payload.state;move(c,desk(found.index),at);
+      if(!meetings.get(e.bot_id)?.size){c.state=e.payload.state;move(c,desk(found.index),at)}
     }else if(e.type==='message.sent'&&typeof e.payload.summary==='string'){
       c.bubble=e.payload.summary;c.bubbleAt=at;
-    }else if(e.type==='error.raised')c.state='error';
+    }else if((e.type==='group.delegated'||e.type==='group.replied')&&typeof e.payload.summary==='string'){c.bubble=e.payload.summary;c.bubbleAt=at;
+    }else if(e.type==='error.raised'&&!meetings.get(e.bot_id)?.size)c.state='error';
   }
   return characters;
 }

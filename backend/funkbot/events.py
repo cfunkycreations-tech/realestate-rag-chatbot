@@ -27,7 +27,23 @@ class ErrorRaised(BaseModel):
     message: str = Field(max_length=500)
 
 
+class GroupSession(BaseModel):
+    mission_id: str
+    participants: list[str] = Field(min_length=2, max_length=6)
+
+
+class GroupExchange(BaseModel):
+    mission_id: str
+    from_bot_id: str
+    to_bot_id: str
+    summary: str = Field(max_length=240)
+
+
 PAYLOAD_TYPES = {
+    'group.session_started': GroupSession,
+    'group.session_ended': GroupSession,
+    'group.delegated': GroupExchange,
+    'group.replied': GroupExchange,
     'run.started': RunStarted,
     'run.finished': RunFinished,
     'bot.state_changed': StateChanged,
@@ -40,7 +56,7 @@ class EventOut(BaseModel):
     id: int
     bot_id: str | None
     run_id: str | None
-    type: Literal['run.started', 'run.finished', 'bot.state_changed', 'message.sent', 'error.raised']
+    type: Literal['run.started', 'run.finished', 'bot.state_changed', 'message.sent', 'error.raised', 'group.session_started', 'group.session_ended', 'group.delegated', 'group.replied']
     payload: dict
     created_at: float
 

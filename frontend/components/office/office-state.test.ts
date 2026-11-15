@@ -46,6 +46,17 @@ describe('office event projection',()=>{
     expect(dispersed.map(c=>c.motion.path.at(-1))).toEqual(bots.map((_,i)=>desk(i)));
     expect(projectOffice(bots,events,start+18000)).toEqual(projectOffice(bots,events,start+18000));
   });
+  it('keeps participants in a real meeting despite their run state until the session ends',()=>{
+    const events:OfficeEvent[]=[
+      {id:1,bot_id:null,run_id:null,type:'group.session_started',payload:{mission_id:'m',participants:['demo-1','demo-2']},created_at:1},
+      {id:2,bot_id:'demo-1',run_id:'r',type:'bot.state_changed',payload:{state:'working'},created_at:2},
+      {id:3,bot_id:'demo-1',run_id:null,type:'group.delegated',payload:{summary:'Research this'},created_at:3},
+      {id:4,bot_id:null,run_id:null,type:'group.session_ended',payload:{mission_id:'m',participants:['demo-1','demo-2']},created_at:5},
+    ];
+    const during=projectOffice(bots,events,4000);
+    expect(during[0].state).toBe('meeting');expect(during[0].motion.path.at(-1)).toEqual(seat(0));expect(during[0].bubble).toBe('Research this');
+    expect(projectOffice(bots,events,6000)[0].motion.path.at(-1)).toEqual(desk(0));
+  });
   it('reduced motion jumps directly to the target',()=>{
     const motion={path:[{x:0,y:0},{x:1,y:0},{x:2,y:0}],at:1000};
     expect(positionAt(motion,1000,true)).toEqual({x:2,y:0});
