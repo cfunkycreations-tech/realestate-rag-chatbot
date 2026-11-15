@@ -36,7 +36,7 @@ from funkbot.database import migrate, session
 from funkbot.events import EventPage, append_event, row_to_event
 from funkbot.auth_security import ensure_setup_token, lockout_seconds
 from funkbot.redaction import SlidingRedactor, redact_text
-from funkbot.memory_capture import capture as capture_memory, normalized as normalized_memory
+from funkbot.memory_capture import capture as capture_memory, normalized as normalized_memory, is_command as is_memory_command, parse_command as parse_memory_command
 from funkbot.skills import parse_invocation, parse_markdown
 from funkbot.schedule import next_occurrence
 from funkbot.backup import create as create_backup, restore as stage_restore, BackupError, MAX_TOTAL as MAX_BACKUP_TOTAL
@@ -1315,9 +1315,64 @@ async def start_chat(bot_id: str, body: ChatIn, mission_id: str | None = None, g
     return {'job_id':job_id}
 
 
+def chat_memory_command(bot_id: str, body: ChatIn):
+    # These commands are local owner actions, never interpreted or executed by
+    # the model. Exact normalized matches prevent accidental fuzzy deletions.
+    if body.attachment_ids: raise HTTPException(400,'Memory commands cannot include attachments.')
+    keys=configured_secrets(); content=redact_text(body.content.strip(),keys)
+    if '[redacted]' in content.casefold(): raise HTTPException(400,'Remove sensitive text before using a memory command.')
+    try: action,old,new=parse_memory_command(content)
+    except ValueError as exc: raise HTTPException(400,str(exc)) from exc
+    now=time.time();message_id=str(uuid.uuid4());reply_id=str(uuid.uuid4())
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        if not c.execute('SELECT 1 FROM bots WHERE id=?',(bot_id,)).fetchone(): raise HTTPException(404,'Bot not found.')
+        chat_id=body.chat_id or default_chat(c,bot_id)
+        if not c.execute('SELECT 1 FROM chats WHERE id=? AND bot_id=?',(chat_id,bot_id)).fetchone(): raise HTTPException(404,'Chat not found.')
+        if c.execute("SELECT 1 FROM runs WHERE bot_id=? AND status IN ('queued','running','waiting_approval')",(bot_id,)).fetchone(): raise HTTPException(409,'This Bot is already responding.')
+        rows=c.execute('SELECT * FROM bot_memories WHERE bot_id=? ORDER BY pinned DESC,updated_at DESC,id',(bot_id,)).fetchall()
+        if action=='help':
+            reply='Local memory control: Use !memory show, !memory remember TEXT, !memory forget EXACT TEXT, or !memory replace OLD => NEW. Forgetting does not erase chat history or event logs.'
+        elif action=='show':
+            lines=[];size=0
+            for row in rows:
+                text=redact_text(row['content'],keys)
+                line='- '+text.replace('\n',' ')+' ('+('pinned' if row['pinned'] else 'not pinned')+')'
+                if size+len(line)>7500: break
+                lines.append(line);size+=len(line)
+            reply='Local memory control: '+('\n'+'\n'.join(lines) if lines else 'No memories for this Bot.')
+            if len(lines)<len(rows): reply+='\nMore entries are available in Lab.'
+            reply+='\nOnly this Bot’s memory is shown. Forgetting a memory does not erase chat history or event logs; old chat text may still be sent to the model.'
+        elif action=='remember':
+            if any(normalized_memory(row['content'])==normalized_memory(old) for row in rows): raise HTTPException(409,'That memory already exists.')
+            if len(rows)>=50 or sum(len(row['content']) for row in rows)+len(old)>32000: raise HTTPException(400,'Memory limit reached (50 entries or 32,000 characters).')
+            c.execute('INSERT INTO bot_memories (id,bot_id,content,pinned,created_at,updated_at,source,source_ref) VALUES (?,?,?,0,?,?,?,?)',(str(uuid.uuid4()),bot_id,old,now,now,'direct_chat',message_id))
+            reply='Local memory control: Saved this Bot memory.'
+        else:
+            matches=[row for row in rows if normalized_memory(row['content'])==normalized_memory(old)]
+            if not matches: raise HTTPException(404,'No exact Bot memory matched. Use !memory show to review.')
+            if len(matches)>1: raise HTTPException(409,'Multiple memories match. Edit or delete them individually in Lab.')
+            item=matches[0]
+            if action=='forget':
+                c.execute('DELETE FROM bot_memories WHERE id=? AND bot_id=?',(item['id'],bot_id))
+                reply='Local memory control: Forgot the matching Bot memory. Chat history and event logs remain, and old chat text may still be sent to the model.'
+            else:
+                if any(row['id']!=item['id'] and normalized_memory(row['content'])==normalized_memory(new) for row in rows): raise HTTPException(409,'The replacement already exists.')
+                if sum(len(row['content']) for row in rows)-len(item['content'])+len(new)>32000: raise HTTPException(400,'Memory limit reached (32,000 characters).')
+                c.execute("UPDATE bot_memories SET content=?,source='direct_chat',source_ref=?,updated_at=? WHERE id=? AND bot_id=?",(new,message_id,now,item['id'],bot_id))
+                reply='Local memory control: Updated the matching Bot memory; its pin is unchanged.'
+        for mid,role,text in ((message_id,'user',content),(reply_id,'assistant',reply)):
+            c.execute('INSERT INTO messages VALUES (?,?,?,?,?)',(mid,bot_id,role,text,now))
+            c.execute('INSERT INTO chat_messages VALUES (?,?)',(chat_id,mid))
+            append_event(c,bot_id,None,'message.sent',{'message_id':mid,'role':role,'summary':text[:240]})
+        c.execute('UPDATE chats SET updated_at=? WHERE id=?',(now,chat_id))
+    return {'local_memory':True}
+
+
 @app.post('/api/bots/{bot_id}/chat')
 async def chat(bot_id: str, body: ChatIn, request: Request):
     require_auth(request)
+    if is_memory_command(body.content): return chat_memory_command(bot_id,body)
     return await start_chat(bot_id,body)
 
 
@@ -2054,7 +2109,7 @@ def update_memory(bot_id: str, memory_id: str, body: MemoryIn, request: Request)
         if not previous: raise HTTPException(404,'Memory not found.')
         total=c.execute('SELECT COALESCE(SUM(LENGTH(content)),0) FROM bot_memories WHERE bot_id=?',(bot_id,)).fetchone()[0]
         if total-previous['size']+len(content)>32000: raise HTTPException(400,'Memory limit reached (32,000 characters).')
-        c.execute('UPDATE bot_memories SET content=?,pinned=?,updated_at=? WHERE id=? AND bot_id=?',(content,int(body.pinned),time.time(),memory_id,bot_id))
+        c.execute("UPDATE bot_memories SET content=?,pinned=?,source='owner',source_ref=NULL,updated_at=? WHERE id=? AND bot_id=?",(content,int(body.pinned),time.time(),memory_id,bot_id))
     return {'ok':True}
 
 

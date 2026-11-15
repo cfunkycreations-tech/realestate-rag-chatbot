@@ -43,3 +43,34 @@ def capture(c, bot_id, message_id, message, now):
         VALUES (?,?,?,0,?,?,?,?)''',
         (str(uuid.uuid4()),bot_id,text,now,now,'direct_chat',message_id))
     return True
+
+
+def is_command(text):
+    """Only the explicit, owner-typed prefix invokes local memory control."""
+    return bool(re.match(r'^!memory(?:\s|$)', text.strip(), re.IGNORECASE))
+
+
+def parse_command(text):
+    """Return a bounded operation. No fuzzy deletions or model interpretation."""
+    command = text.strip()
+    parts = command.split(None, 2)
+    if len(parts) == 1 or (len(parts) == 2 and parts[1].lower() == 'help'):
+        return ('help', None, None)
+    if len(parts) == 2 and parts[1].lower() == 'show':
+        return ('show', None, None)
+    if len(parts) < 3:
+        raise ValueError('Use !memory show, remember TEXT, forget TEXT, or replace OLD => NEW.')
+    action = parts[1].lower()
+    arg = parts[2].strip()
+    if action == 'replace':
+        pieces = arg.split(' => ')
+        if len(pieces) != 2:
+            raise ValueError('Use !memory replace OLD => NEW with one separator.')
+        old, new = (piece.strip() for piece in pieces)
+    elif action in ('remember', 'forget'):
+        old, new = arg, None
+    else:
+        raise ValueError('Use !memory show, remember TEXT, forget TEXT, or replace OLD => NEW.')
+    if not old or not normalized(old) or len(old) > 4000 or (new is not None and (not new or not normalized(new) or len(new) > 4000)):
+        raise ValueError('Memory text must be between 1 and 4,000 characters.')
+    return (action, old, new)

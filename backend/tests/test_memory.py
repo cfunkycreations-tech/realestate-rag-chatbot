@@ -124,3 +124,56 @@ def test_shared_recall_for_every_bot_and_project_recall_only_for_linked_mission(
         asyncio.run(run_linked())
         prompt=payloads[-1]['messages'][0]['content']
         assert 'Shared preference' in prompt and 'Project-only fact' in prompt
+
+
+def test_direct_chat_memory_commands_are_local_scoped_exact_and_preserve_pins(monkeypatch):
+    payloads=[]
+    class Recording(FakeClient):
+        def stream(self,*args,**kwargs): payloads.append(kwargs['json']);return super().stream(*args,**kwargs)
+    monkeypatch.setattr(service.httpx,'AsyncClient',Recording)
+    with TestClient(service.app) as c:
+        assert c.post('/api/bots/no/chat',json={'content':'!memory show'}).status_code==401
+        setup(c);configure_budget(c)
+        bot=c.post('/api/bots',json={'name':'Memory Bot'}).json()['id']
+        other=c.post('/api/bots',json={'name':'Other Bot'}).json()['id']
+        chat=c.get(f'/api/bots/{bot}/chats').json()[0]['id']
+        def command(text): return c.post(f'/api/bots/{bot}/chat',json={'content':text,'chat_id':chat})
+        assert command('!memory help').json()=={'local_memory':True}
+        assert 'Use !memory show' in c.get(f'/api/bots/{bot}/chats/{chat}/messages').text
+        assert command('!memory remember ...').status_code==400
+        assert command('!memory remember I prefer concise answers').json()=={'local_memory':True}
+        item=c.get(f'/api/bots/{bot}/memory').json()[0]
+        assert item['source']=='direct_chat' and item['source_ref']
+        assert c.get(f'/api/bots/{other}/memory').json()==[]
+        assert command('!memory remember i prefer concise answers.').status_code==409
+        assert c.put(f'/api/bots/{bot}/memory/{item["id"]}',json={'content':item['content'],'pinned':True}).status_code==200
+        assert command('!memory show').status_code==200
+        assert 'I prefer concise answers (pinned)' in c.get(f'/api/bots/{bot}/chats/{chat}/messages').text
+        assert command('!memory replace I prefer concise answers => I prefer detailed answers').status_code==200
+        updated=c.get(f'/api/bots/{bot}/memory').json()[0]
+        assert updated['pinned'] and updated['content']=='I prefer detailed answers' and updated['source']=='direct_chat'
+        assert command('!memory forget I prefer detailed').status_code==404
+        assert len(c.get(f'/api/bots/{bot}/memory').json())==1
+        FakeClient.responses=[final_reply()]
+        run=c.post(f'/api/bots/{bot}/chat',json={'content':'Hello','chat_id':chat}).json()['job_id']
+        c.get('/api/jobs/'+run+'/events')
+        assert 'I prefer detailed answers' in payloads[-1]['messages'][0]['content']
+        assert command('!memory forget I prefer detailed answers').status_code==200
+        assert c.get(f'/api/bots/{bot}/memory').json()==[]
+        assert 'Chat history and event logs remain' in c.get(f'/api/bots/{bot}/chats/{chat}/messages').text
+        assert command('!memory replace x => y => z').status_code==400
+        assert c.post(f'/api/bots/{bot}/chat',json={'content':'!memory show','chat_id':chat,'attachment_ids':['x']}).status_code==400
+        assert c.post(f'/api/bots/{other}/chat',json={'content':'!memory show','chat_id':chat}).status_code==404
+        c.put('/api/settings/gateways/openrouter',json={'url':'https://example.com/v1','key':'private-key-abcdefgh12345'})
+        assert command('!memory remember private-key-abcdefgh12345').status_code==400
+        assert 'private-key-abcdefgh12345' not in c.get(f'/api/bots/{bot}/chats/{chat}/messages').text
+        assert len(payloads)==1
+
+
+def test_chat_forget_never_deletes_ambiguous_memory():
+    with TestClient(service.app) as c:
+        setup(c);bot=c.post('/api/bots',json={'name':'Memory Bot'}).json()['id']
+        c.post(f'/api/bots/{bot}/memory',json={'content':'duplicate fact'})
+        c.post(f'/api/bots/{bot}/memory',json={'content':'Duplicate fact.'})
+        assert c.post(f'/api/bots/{bot}/chat',json={'content':'!memory forget duplicate fact'}).status_code==409
+        assert len(c.get(f'/api/bots/{bot}/memory').json())==2
