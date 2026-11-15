@@ -66,3 +66,18 @@ def finish(c, call_id, result, success, redact, now=None):
     changed=c.execute("UPDATE tool_calls SET status=?,result=?,updated_at=? WHERE id=? AND status='running'", (status,json.dumps(_redact_result(result,redact)),now,call_id))
     if not changed.rowcount: raise ToolError('Tool call is not running.')
     audit(c,call_id,status,now)
+
+
+def approve_from_run_grant(c, call_id, now=None):
+    """Use a grant that exists only for the current, live run."""
+    now=time.time() if now is None else now
+    changed=c.execute("UPDATE tool_calls SET status='approved',updated_at=? WHERE id=? AND risk='write' AND status='pending'", (now,call_id))
+    if not changed.rowcount: raise ToolError('This approval is no longer pending.')
+    audit(c,call_id,'run_grant',now)
+
+
+def abort(c, call_id, reason, redact, now=None):
+    """Mark interruption without misrepresenting it as an owner denial."""
+    now=time.time() if now is None else now
+    changed=c.execute("UPDATE tool_calls SET status='failed',result=?,updated_at=? WHERE id=? AND status IN ('pending','approved','running')", (json.dumps({'error':redact(reason)}),now,call_id))
+    if changed.rowcount: audit(c,call_id,'interrupted',now)
