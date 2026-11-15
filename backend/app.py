@@ -32,6 +32,7 @@ from funkbot.database import migrate, session
 from funkbot.events import EventPage, append_event, row_to_event
 from funkbot.auth_security import ensure_setup_token, lockout_seconds
 from funkbot.redaction import SlidingRedactor, redact_text
+from funkbot.memory_capture import capture as capture_memory
 from funkbot.vault import MAX_ARCHIVE, VaultError, character_for_bot, draw_character, import_zip
 from funkbot.budget import BudgetError, NANOS_PER_DOLLAR, dollars_to_nanos, limit_to_nanos, limits_for, reconcile_run, reconcile_usage, reserve, reserve_followup, settle, token_cost_nanos
 from funkbot.tool_policy import WebPolicy
@@ -570,6 +571,9 @@ def finish_run(job, status, kind, values=None, completion=None):
                 message_id = str(uuid.uuid4())
                 c.execute('INSERT INTO messages VALUES (?,?,?,?,?)', (message_id, bot_id, 'assistant', content, time.time()))
                 append_event(c, bot_id, job['id'], 'message.sent', {'message_id':message_id, 'role':'assistant', 'summary':content[:240]})
+                if not job.get('mission_id') and job.get('user_message_id'):
+                    source=c.execute("SELECT content FROM messages WHERE id=? AND bot_id=? AND role='user'",(job['user_message_id'],bot_id)).fetchone()
+                    if source: capture_memory(c,bot_id,job['user_message_id'],source['content'],time.time())
             warning=settle_round(c,job,bot_id,gateway,model,usage)
             if warning: values['warning']=warning
         else:
@@ -780,7 +784,7 @@ async def start_chat(bot_id: str, body: ChatIn, mission_id: str | None = None, g
             message_id = str(uuid.uuid4())
             c.execute('INSERT INTO messages VALUES (?,?,?,?,?)',(message_id,bot_id,'user',content,now))
             append_event(c, bot_id, job_id, 'message.sent', {'message_id':message_id, 'role':'user', 'summary':content[:240]})
-    job={'id':job_id,'bot_id':bot_id,'done':False,'created':time.time(),'notify':asyncio.Event(),'entries':entries,'max_completion_tokens':price['max_completion_tokens'],'max_prompt_tokens':price['max_prompt_tokens'],'secrets':set(keys),'mission_id':mission_id,'group_managed':group_managed,'lab_step_id':lab_step_id}; jobs[job_id]=job
+    job={'id':job_id,'bot_id':bot_id,'done':False,'created':time.time(),'notify':asyncio.Event(),'entries':entries,'max_completion_tokens':price['max_completion_tokens'],'max_prompt_tokens':price['max_prompt_tokens'],'secrets':set(keys),'mission_id':mission_id,'group_managed':group_managed,'lab_step_id':lab_step_id,'user_message_id':message_id if not lab_step_id else None}; jobs[job_id]=job
     policy=WebPolicy.model_validate_json(config('web_policy','{}'))
     context=ToolContext(db,DATA,job_id,bot_id,lambda text:redact_text(text,list(job['secrets'])),policy.allow,policy.deny,lambda _:None)
     job['tool_bridge']=ToolBridge(context,lambda item:tool_event(job,item))
