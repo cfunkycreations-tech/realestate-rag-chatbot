@@ -82,10 +82,10 @@
 /* Hero image and preview share the same cover, focal point, zoom and shade. */
 .command-banner{height:240px;min-height:240px;flex-shrink:0;overflow:hidden;transition:height .22s ease,min-height .22s ease}
 .command-banner.collapsed{height:60px;min-height:60px}
-.banner-image{position:absolute;inset:0;display:block;background-size:cover;background-repeat:no-repeat;transform-origin:center;pointer-events:none}
+.banner-image{position:absolute;inset:0;display:block;background-size:contain;background-position:center;background-repeat:no-repeat;transform-origin:center;pointer-events:none}
 .banner-shade{position:absolute;inset:0;display:block;background:linear-gradient(90deg,rgba(12,5,24,.78),rgba(14,7,24,.63) 50%,rgba(12,5,24,.78));pointer-events:none}
 .command-banner>div,.command-banner>button{z-index:1}
-.banner-preview{position:relative;overflow:hidden;aspect-ratio:4/1;min-height:110px;background:linear-gradient(110deg,#211035,#4b1f62 50%,#21102d);border:1px solid var(--command-frame);border-radius:9px;touch-action:none;cursor:crosshair;display:grid;place-items:center}
+.banner-preview{position:relative;overflow:hidden;aspect-ratio:4/1;min-height:110px;background:linear-gradient(110deg,#211035,#4b1f62 50%,#21102d);border:1px solid var(--command-frame);border-radius:9px;display:grid;place-items:center}
 .banner-preview-title{position:relative;text-align:center;z-index:1;color:white;font-weight:900;letter-spacing:.1em;text-shadow:0 0 18px #e36dff;pointer-events:none}.banner-preview-title small{display:block;color:#eec37e;font-size:9px;letter-spacing:.25em}
 .banner-focal{position:absolute;z-index:2;width:16px;height:16px;border:2px solid white;border-radius:50%;box-shadow:0 0 0 1px #251032;transform:translate(-50%,-50%);pointer-events:none}
 @media(max-width:700px){.command-banner{height:160px;min-height:160px}.command-banner.collapsed{height:60px;min-height:60px}}

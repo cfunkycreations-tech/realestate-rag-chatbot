@@ -14,7 +14,7 @@ try{
  assert.equal((await (await req.get(base+'/api/auth/status')).json()).setup,false,'Fresh installation required.');
  assert.equal((await req.post(base+'/api/auth/setup',{data:{password:'disposable-test-password',setup_token:token}})).status(),200);
  const fallback=await (await req.post(base+'/api/bots',{data:{name:'Fallback',title:'Researcher'}})).json();
- await page.goto(base);await page.getByRole('heading',{name:'Your team, at a glance.'}).waitFor();await page.locator('.sidebar .bot-row').first().waitFor();assert.equal(await page.locator('.collection-entry').count(),0,'A sole Uncategorized group is hidden');
+ await page.goto(base);await page.getByRole('heading',{name:'Your team, at a glance.'}).waitFor();await page.locator('.sidebar .bot-row').first().waitFor();assert.equal(await page.locator('.collection-entry').count(),0,'The sidebar is flat');
  const zip=fs.readFileSync(path.join(here,'../tests/fixtures/identity-characters.zip'));
  const imported=await req.post(base+'/api/vault/import',{multipart:{file:{name:'characters.zip',mimeType:'application/zip',buffer:zip}}});assert.equal((await imported.json()).added,2);
  for(let i=1;i<=12;i++){
@@ -31,7 +31,7 @@ try{
  assert.equal(colors.row.border,colors.gallery.border,'selected row and card must share the gold frame');
  const old=['rgb(23, 23, 24)','rgb(34, 34, 36)','rgb(41, 38, 46)','rgb(29, 29, 31)','rgb(48, 48, 50)'];
  for(const [key,value] of Object.entries(colors))if(typeof value==='object')for(const color of Object.values(value))assert(!old.includes(color),`old gray ${color} in ${key}`);
- const toggle=page.getByRole('button',{name:'Collapse Test'});await toggle.click();assert.equal(await page.locator('.sidebar .bot-row img').count(),0);await page.getByRole('button',{name:'Expand Test'}).click();
+ assert.equal(await page.locator('.sidebar .collection-entry').count(),0,'Tagged Bots remain in a flat list');assert.equal(await page.locator('.sidebar .bot-row').count(),13);
  await page.locator('.sidebar .bot-row').filter({hasText:'Fixture 2'}).click();await page.getByRole('dialog',{name:'Fixture 2 spotlight'}).waitFor();await page.getByRole('button',{name:'Close spotlight'}).click();
  assert.equal(await page.locator('.sidebar .bot-row.active').getAttribute('aria-pressed'),'true');assert.equal(await page.getByRole('button',{name:'Open Fixture 2 spotlight'}).getAttribute('aria-pressed'),'true');
  await page.getByRole('button',{name:'Open Fixture 3 spotlight'}).click();await page.getByRole('button',{name:'Close spotlight'}).click();assert((await page.locator('.sidebar .bot-row.active').innerText()).includes('Fixture 3'));
@@ -48,5 +48,5 @@ try{
  await nav.getByRole('button',{name:'Roster',exact:true}).click();await shot('roster-mobile');
  await nav.getByRole('button',{name:'Office',exact:true}).click();await page.getByText('LIVE · REAL EVENTS ONLY').waitFor();await shot('office-mobile');
  assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'mobile page overflows');assert.equal(errors.length,0,errors.join('\n'));assert.deepEqual(chatRequests,[],'Visual browsing must not call a model');
- console.log('Visual pass: 12 sprite Bots, fallback, themed sidebar colors, synced selection, collections, drawer, Gallery/Roster/Office desktop and 390px screenshots passed.');
+ console.log('Visual pass: 12 sprite Bots, fallback, themed sidebar colors, synced selection, flat sidebar, drawer, Gallery/Roster/Office desktop and 390px screenshots passed.');
 }finally{await browser.close()}
