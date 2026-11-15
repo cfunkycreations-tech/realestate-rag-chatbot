@@ -2509,6 +2509,50 @@ def account_tool_audit(request: Request, before: int | None = Query(default=None
     return {'calls':calls,'next_before':calls[-1]['cursor'] if len(rows)>20 else None}
 
 
+@app.get('/api/tool-audit/export')
+def export_tool_audit(request: Request, format: Literal['json','csv']='json', bot_id: str | None = Query(default=None,max_length=128)):
+    """Export persisted calls and their ordered decision histories from one snapshot."""
+    from funkbot.tool_audit import _redact_result
+    require_auth(request)
+    keys=configured_secrets()
+    def stream():
+        with db() as c:
+            c.execute('BEGIN')
+            rows=c.execute('SELECT * FROM tool_calls WHERE (? IS NULL OR bot_id=?) ORDER BY rowid',(bot_id,bot_id))
+            fields=['id','run_id','bot_id','tool_name','risk','arguments','status','result','created_at','updated_at','audit']
+            if format=='json':
+                yield '['
+            else:
+                buffer=io.StringIO(newline='');writer=csv.DictWriter(buffer,fieldnames=fields,lineterminator='\r\n')
+                writer.writeheader();yield buffer.getvalue();buffer.seek(0);buffer.truncate(0)
+            first=True
+            for row in rows:
+                call=dict(row)
+                call['arguments']=json.loads(call['arguments'])
+                call['result']=json.loads(call['result']) if call['result'] is not None else None
+                call['audit']=[dict(item) for item in c.execute('SELECT action,created_at FROM tool_audit WHERE call_id=? ORDER BY id',(call['id'],))]
+                # MCP embeds JSON arguments in a string. Parse it before redaction,
+                # so JSON escaping cannot hide newly configured secrets.
+                if call['tool_name']=='mcp_call' and isinstance(call['arguments'].get('arguments_json'),str):
+                    try:
+                        nested=json.loads(call['arguments']['arguments_json'])
+                        call['arguments']['arguments_json']=json.dumps(_redact_result(nested,lambda text:redact_text(text,keys)),ensure_ascii=False)
+                    except (ValueError,TypeError):
+                        # Invalid historical content is safer omitted than potentially exposed.
+                        call['arguments']['arguments_json']='[unavailable]'
+                call=_redact_result(call,lambda text:redact_text(text,keys))
+                if format=='json':
+                    yield ('' if first else ',')+json.dumps(call,ensure_ascii=False)
+                    first=False
+                else:
+                    for field in ('arguments','result','audit'):
+                        call[field]=json.dumps(call[field],ensure_ascii=False)
+                    writer.writerow({key:csv_safe(value) for key,value in call.items()})
+                    yield buffer.getvalue();buffer.seek(0);buffer.truncate(0)
+            if format=='json': yield ']'
+    return StreamingResponse(stream(),media_type='application/json' if format=='json' else 'text/csv',headers={'Content-Disposition':f'attachment; filename="funk-bot-tool-audit.{format}"','Cache-Control':'no-store','X-Content-Type-Options':'nosniff'})
+
+
 @app.get('/api/jobs/{job_id}/tool-calls')
 def job_tool_calls(job_id: str, request: Request):
     require_auth(request)

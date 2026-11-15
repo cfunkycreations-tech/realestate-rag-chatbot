@@ -253,7 +253,7 @@ Import accepts UTF-8 `SKILL.md` files up to 32 KB in either a simple `#` title w
 
 ### Event export
 
-In **Settings → Tool audit**, export the recorded account event log as JSON or CSV. The authenticated export streams in event order and reapplies known-secret filtering, but no filter is complete. Exports are private and may include message summaries. CSV cells that resemble spreadsheet formulas are prefixed for safety. This is an event export, not a complete tool-audit export or workspace backup. Deleting a Bot deletes its event history.
+In **Settings → Tool audit**, export recorded events or tool calls and their decision histories as JSON or CSV. The authenticated exports stream in recorded order and reapply known-secret filtering, but no filter is complete. Exports are private and may include message summaries, tool arguments and results. CSV cells that resemble spreadsheet formulas are prefixed for safety. These are not workspace backups. Deleting a Bot deletes its event history and tool activity.
 
 ### Tool review policies
 
