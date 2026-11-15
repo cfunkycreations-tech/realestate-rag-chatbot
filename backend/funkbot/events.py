@@ -40,6 +40,7 @@ class GroupExchange(BaseModel):
 
 
 PAYLOAD_TYPES = {
+    'handoff.created': GroupExchange,
     'group.session_started': GroupSession,
     'group.session_ended': GroupSession,
     'group.delegated': GroupExchange,
@@ -56,7 +57,7 @@ class EventOut(BaseModel):
     id: int
     bot_id: str | None
     run_id: str | None
-    type: Literal['run.started', 'run.finished', 'bot.state_changed', 'message.sent', 'error.raised', 'group.session_started', 'group.session_ended', 'group.delegated', 'group.replied']
+    type: Literal['handoff.created', 'run.started', 'run.finished', 'bot.state_changed', 'message.sent', 'error.raised', 'group.session_started', 'group.session_ended', 'group.delegated', 'group.replied']
     payload: dict
     created_at: float
 

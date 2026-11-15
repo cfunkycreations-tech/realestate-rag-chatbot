@@ -219,6 +219,10 @@ Open **Settings → Budget** to set caps and profile prices. The account and eac
 
 ### Follow-ups
 
+### Owner-initiated handoffs
+
+In a Bot spotlight, open Handoffs to choose another Bot and enter a reason and context. This immediately creates and starts a receiver mission, subject to the existing budget, pause and tool-approval controls. Both Bot spotlights show the handoff and its mission status; Office and activity show the actual recorded event. Context is untrusted data, not permission for actions. The owner initiates these handoffs; Bots cannot autonomously hand off from arbitrary chats, and these cards are not part of multiple independent chat threads. The latest 100 handoffs per Bot are shown. Deleting a Bot can leave an anonymized handoff on the other Bot; deleting the mission removes its handoff.
+
 During a response a Bot may propose a follow-up with a summary and an ISO 8601 date/time including a timezone offset. The owner must approve the displayed proposal before it is saved. Follow-ups persist across restarts, are limited to 500 open items account-wide and may be due up to 366 days ahead. The Inbox shows approved items, highlights due entries while the app is open, and lets you mark them done or delete them. The app does not launch a new run, send an email or produce an operating-system push notification when one becomes due. Deleting a Bot deletes its follow-ups.
 
 ### Global pause

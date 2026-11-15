@@ -57,6 +57,7 @@ describe('office event projection',()=>{
     expect(during[0].state).toBe('meeting');expect(during[0].motion.path.at(-1)).toEqual(seat(0));expect(during[0].bubble).toBe('Research this');
     expect(projectOffice(bots,events,6000)[0].motion.path.at(-1)).toEqual(desk(0));
   });
+  it('projects a real handoff summary without inventing activity',()=>{const events:OfficeEvent[]=[{id:1,bot_id:'demo-1',run_id:null,type:'handoff.created',payload:{summary:'Review this'},created_at:1}];const scene=projectOffice(bots,events,2000);expect(scene[0].bubble).toBe('Review this');expect(scene[1].bubble).toBe('')});
   it('reduced motion jumps directly to the target',()=>{
     const motion={path:[{x:0,y:0},{x:1,y:0},{x:2,y:0}],at:1000};
     expect(positionAt(motion,1000,true)).toEqual({x:2,y:0});
