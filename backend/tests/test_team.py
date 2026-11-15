@@ -56,3 +56,17 @@ def test_roster_supports_more_than_fifty_bots():
                 c.execute('INSERT INTO bots VALUES (?,?,?,?,?,?,?,?)', (str(i),f'Bot {i}','Role','Instructions','mint','round','smart',i))
         assert client.post('/api/bots',json={'name':'Bot 51'}).status_code==200
         assert len(client.get('/api/bots').json())==51
+
+
+def test_banner_placement_private_validated_and_persistent():
+    with TestClient(service.app) as client:
+        assert client.get('/api/settings/banner-placement').status_code == 401
+        assert client.put('/api/settings/banner-placement', json={'x':10}).status_code == 401
+        setup(client)
+        assert client.get('/api/settings/banner-placement').json() == {'x':50,'y':50,'zoom':1}
+        placement = {'x':13,'y':84,'zoom':2.3}
+        assert client.put('/api/settings/banner-placement', json=placement).json() == placement
+        assert client.put('/api/settings/banner-placement', json={'x':-1,'y':50,'zoom':1}).status_code == 422
+        assert client.put('/api/settings/banner-placement', json={'x':50,'y':50,'zoom':4}).status_code == 422
+        service.init_db()
+        assert client.get('/api/settings/banner-placement').json() == placement

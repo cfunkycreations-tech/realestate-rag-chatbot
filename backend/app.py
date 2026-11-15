@@ -610,6 +610,25 @@ def team_overview(request: Request, day_start: float = Query(ge=0), bot_id: str 
             'states':{r['bot_id']:json.loads(r['payload'])['state'] for r in states if r['bot_id']}}
 
 
+class BannerPlacement(BaseModel):
+    x: float = Field(default=50, ge=0, le=100, allow_inf_nan=False)
+    y: float = Field(default=50, ge=0, le=100, allow_inf_nan=False)
+    zoom: float = Field(default=1, ge=1, le=3, allow_inf_nan=False)
+
+
+@app.get('/api/settings/banner-placement')
+def get_banner_placement(request: Request):
+    require_auth(request)
+    return BannerPlacement.model_validate_json(config('banner_placement', '{}')).model_dump()
+
+
+@app.put('/api/settings/banner-placement')
+def save_banner_placement(body: BannerPlacement, request: Request):
+    require_auth(request)
+    set_config('banner_placement', body.model_dump_json())
+    return body.model_dump()
+
+
 @app.get('/api/settings/banner')
 def banner(request: Request):
     require_auth(request)
