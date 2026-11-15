@@ -5,6 +5,8 @@ import warnings
 import json
 import logging
 import os
+import re
+import stat
 import secrets
 import time
 import uuid
@@ -997,6 +999,80 @@ def detach_project_mission(project_id: str, mission_id: str, request: Request):
         if not c.execute('DELETE FROM project_missions WHERE project_id=? AND mission_id=?',(project_id,mission_id)).rowcount: raise HTTPException(404, 'Project mission not found.')
         c.execute('UPDATE projects SET updated_at=? WHERE id=?',(time.time(),project_id))
     return {'ok':True}
+
+
+def project_workspace_bots(c, project_id):
+    project=c.execute('SELECT owner_bot_id FROM projects WHERE id=?',(project_id,)).fetchone()
+    if not project: raise HTTPException(404, 'Project not found.')
+    ids={project['owner_bot_id']} if project['owner_bot_id'] else set()
+    ids.update(row['bot_id'] for row in c.execute('SELECT DISTINCT mission_assignees.bot_id FROM project_missions JOIN mission_assignees ON mission_assignees.mission_id=project_missions.mission_id WHERE project_missions.project_id=? AND mission_assignees.bot_id IS NOT NULL',(project_id,)))
+    return ids
+
+
+def open_workspace(bot_id):
+    # Never follow links or accept a caller-supplied directory outside DATA.
+    try:
+        if str(uuid.UUID(bot_id)) != bot_id: raise ValueError()
+    except ValueError: raise HTTPException(400, 'Invalid Bot workspace.')
+    if not hasattr(os,'O_NOFOLLOW') or not hasattr(os,'O_DIRECTORY') or os.open not in os.supports_dir_fd:
+        raise HTTPException(503, 'Secure workspace reads are not supported on this platform; use Docker.')
+    flags=os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW
+    fds=[]
+    try:
+        fds.append(os.open(DATA,flags))
+        fds.append(os.open('workspaces',flags,dir_fd=fds[-1]))
+        return os.open(bot_id,flags,dir_fd=fds[-1])
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise HTTPException(400, 'Could not safely access the workspace.') from exc
+    finally:
+        for fd in fds: os.close(fd)
+
+
+@app.get('/api/projects/{project_id}/files')
+def project_files(project_id: str, request: Request):
+    require_auth(request)
+    with db() as c: bot_ids=project_workspace_bots(c,project_id)
+    files=[]
+    for bot_id in sorted(bot_ids):
+        fd=open_workspace(bot_id)
+        if fd is None: continue
+        try:
+            with os.scandir(fd) as entries:
+                for entry in entries:
+                    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,79}\.txt',entry.name): continue
+                    try:
+                        info=entry.stat(follow_symlinks=False)
+                        if stat.S_ISREG(info.st_mode): files.append({'bot_id':bot_id,'name':entry.name,'size':info.st_size,'modified_at':info.st_mtime})
+                    except FileNotFoundError: continue
+        finally: os.close(fd)
+    return sorted(files,key=lambda item:(item['bot_id'],item['name']))
+
+
+@app.get('/api/projects/{project_id}/files/{bot_id}/{filename}')
+def project_file(project_id: str, bot_id: str, filename: str, request: Request):
+    require_auth(request)
+    with db() as c: bot_ids=project_workspace_bots(c,project_id)
+    if bot_id not in bot_ids: raise HTTPException(404, 'Workspace not found in this project.')
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,79}\.txt',filename): raise HTTPException(404, 'File not found.')
+    directory=open_workspace(bot_id)
+    if directory is None: raise HTTPException(404, 'File not found.')
+    try:
+        try:
+            fd=os.open(filename,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=directory)
+        except OSError: raise HTTPException(404, 'File not found.')
+        try:
+            info=os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode): raise HTTPException(404, 'File not found.')
+            if info.st_size>65536: raise HTTPException(413, 'File is too large to preview (64 KB maximum).')
+            with os.fdopen(fd,'rb',closefd=False) as stream: data=stream.read(65537)
+            if len(data)>65536: raise HTTPException(413, 'File is too large to preview (64 KB maximum).')
+            try: text=data.decode('utf-8')
+            except UnicodeDecodeError: raise HTTPException(400, 'File is not UTF-8 text.')
+            return {'content':redact_text(text,configured_secrets()),'size':len(data),'modified_at':info.st_mtime}
+        finally: os.close(fd)
+    finally: os.close(directory)
 
 
 @app.get('/api/bots/{bot_id}/latest-run')

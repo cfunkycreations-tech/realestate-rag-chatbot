@@ -43,3 +43,28 @@ def test_project_validation_and_missing_records():
         assert c.delete(f'/api/projects/{p}/notes/missing').status_code==404
         assert c.put(f'/api/projects/{p}',json={'name':'Updated'}).status_code==200
         assert c.get(f'/api/projects/{p}').json()['name']=='Updated'
+
+
+def test_project_workspace_reads_are_scoped_read_only_and_reject_symlinks(tmp_path):
+    with TestClient(service.app) as c:
+        setup(c)
+        bot=c.post('/api/bots',json={'name':'Owner'}).json()['id']
+        other=c.post('/api/bots',json={'name':'Other'}).json()['id']
+        p=c.post('/api/projects',json={'name':'Project','owner_bot_id':bot}).json()['id']
+        directory=tmp_path/'workspaces'/bot; directory.mkdir(parents=True)
+        (directory/'note.txt').write_text('actual note')
+        (directory/'large.txt').write_text('x'*65537)
+        (directory/'link.txt').symlink_to(tmp_path/'secret.txt')
+        (tmp_path/'secret.txt').write_text('private')
+        files=c.get(f'/api/projects/{p}/files').json()
+        assert [f['name'] for f in files]==['large.txt','note.txt']
+        assert next(f for f in files if f['name']=='note.txt')['size']==11
+        assert c.get(f'/api/projects/{p}/files/{bot}/note.txt').json()['content']=='actual note'
+        assert c.get(f'/api/projects/{p}/files/{bot}/large.txt').status_code==413
+        assert c.get(f'/api/projects/{p}/files/{bot}/link.txt').status_code==404
+        assert c.get(f'/api/projects/{p}/files/{other}/note.txt').status_code==404
+        assert c.get(f'/api/projects/{p}/files/{bot}/%2e%2e%2fsecret.txt').status_code==404
+        (directory/'note.txt').unlink()
+        directory.rename(tmp_path/'renamed')
+        directory.symlink_to(tmp_path, target_is_directory=True)
+        assert c.get(f'/api/projects/{p}/files').status_code==400
