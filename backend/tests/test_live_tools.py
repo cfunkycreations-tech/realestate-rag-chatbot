@@ -56,7 +56,7 @@ def test_streamed_tool_approval_and_accounted_followup(monkeypatch,decision,exis
         assert any(e['type']=='tool.proposed' and e['needs_decision'] for e in events)
         assert any(e['type']=='tool.decision' and e['decision']==decision for e in events)
         assert (service.DATA/'workspaces'/bot/'approved.txt').exists()==exists
-        assert len(captured)==2 and len(captured[0]['tools'])==2
+        assert len(captured)==2 and len(captured[0]['tools'])==3
         assert captured[1]['messages'][-1]['role']=='tool'
         assert json.loads(captured[1]['messages'][-1]['content'])['status']==('completed' if exists else 'denied')
         assert c.get(f'/api/bots/{bot}/messages').json()[-1]['content']=='All done.'

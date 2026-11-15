@@ -38,6 +38,12 @@ class NotesArgs(BaseModel):
     content: str = Field(max_length=16000)
 
 
+class FollowupArgs(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    summary: str = Field(min_length=1,max_length=1000)
+    due: str = Field(min_length=10,max_length=64,description='ISO 8601 datetime with explicit timezone offset, for example 2027-01-15T09:00:00-06:00.')
+
+
 @dataclass(frozen=True)
 class ToolSpec:
     name: str
@@ -49,6 +55,7 @@ class ToolSpec:
 REGISTRY = {
     'web_fetch': ToolSpec('web_fetch', 'read', WebFetchArgs, 'Fetch text from an explicitly allowed public website.'),
     'write_note': ToolSpec('write_note', 'write', NotesArgs, 'Create a text note in this Bot’s workspace.'),
+    'create_followup': ToolSpec('create_followup', 'write', FollowupArgs, 'Propose a reminder for unfinished Bot work. Requires owner approval; provide an ISO datetime with timezone.'),
 }
 
 

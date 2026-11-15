@@ -5,7 +5,7 @@ from funkbot.tools import ToolError
 
 def test_declarations_expose_only_the_two_typed_tools():
     items=declarations()
-    assert [item['function']['name'] for item in items]==['web_fetch','write_note']
+    assert [item['function']['name'] for item in items]==['web_fetch','write_note','create_followup']
     assert all(item['function']['parameters']['additionalProperties'] is False for item in items)
 
 

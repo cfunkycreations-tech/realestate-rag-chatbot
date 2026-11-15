@@ -1,6 +1,9 @@
 """Audited tool execution for a live run, independent of the model adapter."""
 import asyncio
 import json
+import time
+import uuid
+from datetime import datetime
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -58,6 +61,23 @@ async def execute(context: ToolContext, name: str, args: dict, wait_decision):
         try:
             if name=='web_fetch': result=await tools.web_fetch(tools.WebFetchArgs.model_validate(safe_args),context.allow,context.deny)
             elif name=='write_note': result=tools.write_note(context.data_dir,context.bot_id,tools.NotesArgs.model_validate(safe_args))
+            elif name=='create_followup':
+                body=tools.FollowupArgs.model_validate(safe_args)
+                try:
+                    due=datetime.fromisoformat(body.due.replace('Z','+00:00'))
+                    if due.tzinfo is None or due.utcoffset() is None: raise ValueError()
+                    timestamp=due.timestamp()
+                except (ValueError,OverflowError,OSError) as exc:
+                    raise tools.ToolError('Enter an ISO 8601 datetime with an explicit timezone.') from exc
+                now=time.time();summary=body.summary.strip()
+                if not summary: raise tools.ToolError('Enter a follow-up summary.')
+                if not now<timestamp<=now+366*86400: raise tools.ToolError('The follow-up must be due in the next 366 days.')
+                with context.db() as c:
+                    c.execute('BEGIN IMMEDIATE');live(c,context)
+                    if c.execute("SELECT COUNT(*) FROM followups WHERE status='open'").fetchone()[0]>=500: raise tools.ToolError('Open follow-up limit reached (500).')
+                    followup_id=str(uuid.uuid4())
+                    c.execute("INSERT INTO followups VALUES (?,?,?,?,?,'open',?,?)",(followup_id,context.bot_id,context.run_id,summary,timestamp,now,now))
+                result={'id':followup_id,'due_at':timestamp}
             else: raise tools.ToolError('Unknown tool.')
             success=True
         except tools.ToolError as exc:

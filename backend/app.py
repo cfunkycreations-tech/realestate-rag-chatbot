@@ -1370,6 +1370,33 @@ def delete_project_memory(project_id: str, memory_id: str, request: Request):
     require_auth(request);return layer_delete(project_id,memory_id)
 
 
+@app.get('/api/followups')
+def list_followups(request: Request):
+    require_auth(request);keys=configured_secrets();now=time.time()
+    with db() as c:
+        rows=[dict(row) for row in c.execute("SELECT * FROM followups WHERE status='open' ORDER BY due_at,id LIMIT 500")]
+    for row in rows:
+        row['summary']=redact_text(row['summary'],keys);row['due']=row['due_at']<=now
+    return {'items':rows,'due_count':sum(row['due'] for row in rows)}
+
+
+@app.post('/api/followups/{followup_id}/complete')
+def complete_followup(followup_id: str, request: Request):
+    require_auth(request)
+    with db() as c:
+        if not c.execute("UPDATE followups SET status='done',updated_at=? WHERE id=? AND status='open'",(time.time(),followup_id)).rowcount:
+            raise HTTPException(404,'Open follow-up not found.')
+    return {'ok':True}
+
+
+@app.delete('/api/followups/{followup_id}')
+def delete_followup(followup_id: str, request: Request):
+    require_auth(request)
+    with db() as c:
+        if not c.execute('DELETE FROM followups WHERE id=?',(followup_id,)).rowcount: raise HTTPException(404,'Follow-up not found.')
+    return {'ok':True}
+
+
 class SkillIn(BaseModel):
     slug: str = Field(min_length=1,max_length=32,pattern=r'^[a-z][a-z0-9-]*$')
     name: str = Field(min_length=1,max_length=120)
