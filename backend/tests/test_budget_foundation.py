@@ -127,3 +127,31 @@ def test_unsettled_cost_remains_reserved_after_next_month():
     with service.db() as c:
         assert settle(c,'unknown',None,None,None) is None
     with pytest.raises(BudgetError,match='unreconciled'): reservation('after',bot='different',now=after)
+
+
+def test_uncertain_run_reconciliation_is_explicit_audited_and_never_double_applied():
+    from funkbot.budget import reconcile_run
+    price()
+    reservation('unknown')
+    with service.db() as c:
+        assert settle(c,'unknown',None,None,None) is None
+        with pytest.raises(BudgetError,match='source'): reconcile_run(c,'unknown','0.12','')
+        assert reconcile_run(c,'unknown','0.12','Verified on gateway invoice') == 120_000_000
+        assert c.execute("SELECT note FROM budget_reconciliations WHERE run_id='unknown'").fetchone()['note'] == 'Verified on gateway invoice'
+        with pytest.raises(BudgetError,match='Only an unreconciled'): reconcile_run(c,'unknown','0','Again')
+    assert reservation('next') == 2_000_000
+
+
+def test_historical_missing_cost_requires_audited_owner_confirmation():
+    from funkbot.budget import reconcile_usage
+    price()
+    with service.db() as c:
+        c.execute("INSERT INTO bots VALUES ('old','Old','Editor','Instructions','mint','round','smart',1)")
+        c.execute("INSERT INTO usage (bot_id,gateway,model,prompt_tokens,completion_tokens,cost,created_at) VALUES ('old','gateway','model',1,2,NULL,?)", (time.time(),))
+        usage_id=c.execute('SELECT id FROM usage').fetchone()['id']
+    with pytest.raises(BudgetError,match='historical usage'): reservation('blocked')
+    with service.db() as c:
+        assert reconcile_usage(c,usage_id,'0.03','Verified on provider invoice') == 30_000_000
+        with pytest.raises(BudgetError,match='Only historical'): reconcile_usage(c,usage_id,'0','Again')
+        assert c.execute('SELECT note FROM budget_reconciliations WHERE usage_id=?',(usage_id,)).fetchone()['note'] == 'Verified on provider invoice'
+    assert reservation('allowed') == 2_000_000

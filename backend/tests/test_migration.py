@@ -37,7 +37,7 @@ def test_slice2_database_migrates_without_data_loss(tmp_path, monkeypatch):
         assert c.execute('SELECT status FROM runs WHERE id=?',('r',)).fetchone()['status'] == 'done'
         assert c.execute('SELECT event_type FROM run_events WHERE run_id=?',('r',)).fetchone()['event_type'] == 'done'
         assert c.execute('SELECT completion_tokens FROM usage').fetchone()['completion_tokens'] == 7
-        assert c.execute('SELECT version_num FROM alembic_version').fetchone()[0] == '0005_budget_foundation'
+        assert c.execute('SELECT version_num FROM alembic_version').fetchone()[0] == '0006_budget_reconciliation'
     assert json.loads(service.config('gateways'))['openrouter']['key'] == encrypted
     assert service.gateway_config('openrouter')[1]['Authorization'] == 'Bearer ' + secret
 
@@ -65,9 +65,35 @@ def test_budget_migration_from_previous_schema_preserves_existing_data(tmp_path)
     migrate(path)
     migrate(path)
     with engine.connect() as connection:
-        assert connection.exec_driver_sql('SELECT version_num FROM alembic_version').scalar() == '0005_budget_foundation'
+        assert connection.exec_driver_sql('SELECT version_num FROM alembic_version').scalar() == '0006_budget_reconciliation'
         assert connection.exec_driver_sql("SELECT value FROM config WHERE key='gateways'").scalar() == 'encrypted-existing-value'
         assert connection.exec_driver_sql("SELECT name FROM bots WHERE id='b'").scalar() == 'Original'
         assert connection.exec_driver_sql("SELECT character_id FROM bot_characters WHERE bot_id='b'").scalar() == 'c'
         assert connection.exec_driver_sql("SELECT content FROM messages WHERE id='m'").scalar() == 'keep'
         assert connection.exec_driver_sql('SELECT count(*) FROM budget_reservations').scalar() == 0
+
+
+def test_budget_reconciliation_migration_from_previous_schema(tmp_path):
+    from alembic import command
+    from alembic.config import Config
+    from funkbot.database import engine_for, migrate
+    from pathlib import Path
+    path = tmp_path / 'budget-v1.db'
+    engine = engine_for(str(path))
+    with engine.connect() as c:
+        cfg = Config()
+        cfg.set_main_option('script_location', str(Path(service.__file__).parent / 'funkbot' / 'migrations'))
+        cfg.attributes['connection'] = c
+        command.upgrade(cfg, '0005_budget_foundation')
+        c.commit()
+        c.exec_driver_sql("INSERT INTO budget_limits VALUES ('account',123456789,NULL)")
+        c.exec_driver_sql("INSERT INTO budget_prices VALUES ('smart','1.2','2.3',10000,1000)")
+        c.exec_driver_sql("INSERT INTO budget_reservations (run_id,bot_id,profile,created_at,reserved_nanos,prompt_usd_per_million,completion_usd_per_million,max_prompt_tokens,max_completion_tokens,status) VALUES ('run','bot','smart',1,100,'1.2','2.3',10000,1000,'uncertain')")
+        c.commit()
+    migrate(path)
+    with engine.connect() as c:
+        assert c.exec_driver_sql('SELECT version_num FROM alembic_version').scalar() == '0006_budget_reconciliation'
+        assert c.exec_driver_sql("SELECT daily_nanos FROM budget_limits WHERE scope='account'").scalar() == 123456789
+        assert c.exec_driver_sql("SELECT prompt_usd_per_million FROM budget_prices WHERE profile='smart'").scalar() == '1.2'
+        assert c.exec_driver_sql("SELECT status FROM budget_reservations WHERE run_id='run'").scalar() == 'uncertain'
+        assert c.exec_driver_sql('SELECT count(*) FROM budget_reconciliations').scalar() == 0

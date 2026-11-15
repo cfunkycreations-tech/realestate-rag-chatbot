@@ -114,3 +114,37 @@ def settle(c, run_id, usage_id, prompt_tokens, completion_tokens, now=None):
     c.execute("UPDATE usage SET cost=? WHERE id=?", (cost / NANOS_PER_DOLLAR, usage_id))
     c.execute("UPDATE budget_reservations SET status='settled',actual_nanos=?,usage_id=?,settled_at=? WHERE run_id=?", (cost, usage_id, time.time() if now is None else now, run_id))
     return cost
+
+
+def reconcile_run(c, run_id, amount, note, now=None):
+    """Record an owner's externally verified charge; caller holds a write lock.
+
+    A correction is not represented as reported token usage. Its audit record
+    makes clear that this amount was supplied by the owner, not the gateway.
+    """
+    row = c.execute('SELECT * FROM budget_reservations WHERE run_id=?', (run_id,)).fetchone()
+    if not row or row['status'] != 'uncertain':
+        raise BudgetError('Only an unreconciled run can be corrected.')
+    clean_note = note.strip() if isinstance(note, str) else ''
+    if not clean_note or len(clean_note) > 500:
+        raise BudgetError('Provide a short source for the verified charge.')
+    cost = dollars_to_nanos(amount)
+    timestamp = time.time() if now is None else now
+    c.execute('INSERT INTO budget_reconciliations (run_id,cost_nanos,note,created_at) VALUES (?,?,?,?)', (run_id,cost,clean_note,timestamp))
+    c.execute("UPDATE budget_reservations SET status='settled', actual_nanos=?, settled_at=? WHERE run_id=?", (cost,timestamp,run_id))
+    return cost
+
+
+def reconcile_usage(c, usage_id, amount, note, now=None):
+    """Record an owner's externally verified historical charge."""
+    row = c.execute('SELECT cost FROM usage WHERE id=?', (usage_id,)).fetchone()
+    if not row or row['cost'] is not None:
+        raise BudgetError('Only historical usage without a cost can be corrected.')
+    clean_note = note.strip() if isinstance(note, str) else ''
+    if not clean_note or len(clean_note) > 500:
+        raise BudgetError('Provide a short source for the verified charge.')
+    cost = dollars_to_nanos(amount)
+    timestamp = time.time() if now is None else now
+    c.execute('INSERT INTO budget_reconciliations (usage_id,cost_nanos,note,created_at) VALUES (?,?,?,?)', (usage_id,cost,clean_note,timestamp))
+    c.execute('UPDATE usage SET cost=? WHERE id=?', (cost / NANOS_PER_DOLLAR, usage_id))
+    return cost
