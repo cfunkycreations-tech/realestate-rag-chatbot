@@ -94,3 +94,36 @@ def test_reservation_crossing_midnight_still_counts():
         c.execute("INSERT INTO budget_limits VALUES ('account',2000000,2000000)")
     reservation('before',now=before)
     with pytest.raises(BudgetError,match='daily'): reservation('after',bot='other',now=after)
+
+
+def test_reserves_for_every_possible_fallback_attempt():
+    price()
+    with service.db() as c:
+        c.execute("INSERT INTO budget_limits VALUES ('account',5000000,NULL)")
+    with service.db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        assert reserve(c,'two','one','smart',time.time(),attempts=2) == 4_000_000
+    with service.db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        with pytest.raises(BudgetError,match='daily'): reserve(c,'three','two','smart',time.time(),attempts=1)
+    with service.db() as c:
+        with pytest.raises(BudgetError,match='one to ten'): reserve(c,'zero','two','smart',time.time(),attempts=0)
+
+
+def test_gateway_exceeding_token_bound_is_uncertain():
+    price()
+    reservation('exceeded')
+    with service.db() as c:
+        assert settle(c,'exceeded',None,1001,100) is None
+        assert c.execute("SELECT status FROM budget_reservations WHERE run_id='exceeded'").fetchone()['status'] == 'uncertain'
+    with pytest.raises(BudgetError,match='unreconciled'): reservation('next')
+
+
+def test_unsettled_cost_remains_reserved_after_next_month():
+    price()
+    before = datetime(2026,11,30,23,59,tzinfo=timezone.utc).timestamp()
+    after = datetime(2026,12,1,0,1,tzinfo=timezone.utc).timestamp()
+    reservation('unknown',now=before)
+    with service.db() as c:
+        assert settle(c,'unknown',None,None,None) is None
+    with pytest.raises(BudgetError,match='unreconciled'): reservation('after',bot='different',now=after)

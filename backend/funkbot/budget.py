@@ -55,7 +55,7 @@ def limits_for(c, scope):
     return (row['daily_nanos'], row['monthly_nanos']) if row else (DEFAULT_DAILY, None)
 
 
-def reserve(c, run_id, bot_id, profile, now):
+def reserve(c, run_id, bot_id, profile, now, attempts=1):
     """Reserve the configured maximum. Caller holds BEGIN IMMEDIATE.
 
     Existing historical usage is included once; missing historical costs or an
@@ -64,7 +64,11 @@ def reserve(c, run_id, bot_id, profile, now):
     price = c.execute('SELECT * FROM budget_prices WHERE profile=?', (profile,)).fetchone()
     if not price:
         raise BudgetError(f'Configure prices and token limits for the {profile} profile before running.')
-    maximum = token_cost_nanos(price['max_prompt_tokens'], price['max_completion_tokens'], price['prompt_usd_per_million'], price['completion_usd_per_million'])
+    if type(attempts) is not int or not 1 <= attempts <= 10:
+        raise BudgetError('A profile must contain one to ten models.')
+    maximum = token_cost_nanos(price['max_prompt_tokens'], price['max_completion_tokens'], price['prompt_usd_per_million'], price['completion_usd_per_million']) * attempts
+    if maximum > 9_000_000_000_000_000_000:
+        raise BudgetError('Calculated reservation is too large.')
     day, month = period_starts(now)
     for scope, bot_filter in [('account', None), ('bot:' + bot_id, bot_id)]:
         daily, monthly = limits_for(c, scope)
