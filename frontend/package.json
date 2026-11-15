@@ -15,7 +15,8 @@
     "test:banner": "node scripts/banner-e2e.mjs",
     "test:budget": "node scripts/budget-e2e.mjs",
     "test:delete": "node scripts/delete-bot-e2e.mjs",
-    "test:tools": "node scripts/tool-e2e.mjs"
+    "test:tools": "node scripts/tool-e2e.mjs",
+    "test:missions": "node scripts/missions-e2e.mjs"
   },
   "dependencies": {
     "@tanstack/react-virtual": "^3.14.26",
