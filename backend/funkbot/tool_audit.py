@@ -1,0 +1,68 @@
+"""Transactional audit/state primitives; never execute a tool from this module."""
+import json
+import time
+import uuid
+from pydantic import ValidationError
+from .tools import REGISTRY, ToolError
+
+
+def audit(c, call_id, action, now):
+    c.execute('INSERT INTO tool_audit (call_id,action,created_at) VALUES (?,?,?)', (call_id,action,now))
+
+
+def propose(c, run_id, bot_id, name, arguments, redact, now=None):
+    """Validate and redact before persistence; caller owns a write transaction."""
+    spec=REGISTRY.get(name)
+    if not spec: raise ToolError('Unknown tool.')
+    try:
+        parsed=spec.args.model_validate(arguments).model_dump()
+    except ValidationError as exc:
+        raise ToolError('Invalid tool arguments.') from exc
+    # The exact redacted arguments are both approved and later executed; never
+    # show a sanitized card while executing different hidden arguments.
+    cleaned={key:redact(value) if isinstance(value,str) else value for key,value in parsed.items()}
+    try:
+        cleaned=spec.args.model_validate(cleaned).model_dump()
+    except ValidationError as exc:
+        raise ToolError('Redacted tool arguments are invalid.') from exc
+    call_id=str(uuid.uuid4());now=time.time() if now is None else now
+    status='approved' if spec.risk=='read' else 'pending'
+    c.execute('''INSERT INTO tool_calls (id,run_id,bot_id,tool_name,risk,arguments,status,created_at,updated_at)
+                 VALUES (?,?,?,?,?,?,?,?,?)''', (call_id,run_id,bot_id,name,spec.risk,json.dumps(cleaned),status,now,now))
+    audit(c,call_id,'proposed',now)
+    if status=='approved': audit(c,call_id,'read_auto_approved',now)
+    return call_id
+
+
+def decide(c, call_id, decision, now=None):
+    if decision not in ('approve','approve_once','deny'): raise ToolError('Invalid approval decision.')
+    row=c.execute('SELECT risk,status FROM tool_calls WHERE id=?', (call_id,)).fetchone()
+    if not row or row['risk']!='write' or row['status']!='pending': raise ToolError('This approval is no longer pending.')
+    now=time.time() if now is None else now
+    status='denied' if decision=='deny' else 'approved'
+    c.execute('UPDATE tool_calls SET status=?,updated_at=? WHERE id=?', (status,now,call_id))
+    audit(c,call_id,decision,now)
+    return status
+
+
+def claim(c, call_id, now=None):
+    now=time.time() if now is None else now
+    result=c.execute("UPDATE tool_calls SET status='running',updated_at=? WHERE id=? AND status='approved'", (now,call_id))
+    if not result.rowcount: raise ToolError('Tool call is not approved or has already started.')
+    audit(c,call_id,'started',now)
+    return dict(c.execute('SELECT * FROM tool_calls WHERE id=?', (call_id,)).fetchone())
+
+
+def _redact_result(value, redact):
+    if isinstance(value, str): return redact(value)
+    if isinstance(value, list): return [_redact_result(item, redact) for item in value]
+    if isinstance(value, dict): return {redact(str(key)): _redact_result(item, redact) for key,item in value.items()}
+    return value
+
+
+def finish(c, call_id, result, success, redact, now=None):
+    now=time.time() if now is None else now
+    status='completed' if success else 'failed'
+    changed=c.execute("UPDATE tool_calls SET status=?,result=?,updated_at=? WHERE id=? AND status='running'", (status,json.dumps(_redact_result(result,redact)),now,call_id))
+    if not changed.rowcount: raise ToolError('Tool call is not running.')
+    audit(c,call_id,status,now)
