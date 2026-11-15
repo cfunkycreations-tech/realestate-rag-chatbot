@@ -32,7 +32,7 @@ from funkbot.database import migrate, session
 from funkbot.events import EventPage, append_event, row_to_event
 from funkbot.auth_security import ensure_setup_token, lockout_seconds
 from funkbot.redaction import SlidingRedactor, redact_text
-from funkbot.memory_capture import capture as capture_memory
+from funkbot.memory_capture import capture as capture_memory, normalized as normalized_memory
 from funkbot.vault import MAX_ARCHIVE, VaultError, character_for_bot, draw_character, import_zip
 from funkbot.budget import BudgetError, NANOS_PER_DOLLAR, dollars_to_nanos, limit_to_nanos, limits_for, reconcile_run, reconcile_usage, reserve, reserve_followup, settle, token_cost_nanos
 from funkbot.tool_policy import WebPolicy
@@ -755,6 +755,17 @@ async def start_chat(bot_id: str, body: ChatIn, mission_id: str | None = None, g
             text=redact_text(entry['content'],keys)
             if memory_size+len(text)>8000: continue
             memory.append(text);memory_size+=len(text)
+        if not lab_step_id:
+            # Shared facts are explicitly owner-written. Project facts are used
+            # only for a mission actually linked to that project.
+            scopes=[('Shared',c.execute('SELECT content FROM shared_memories ORDER BY updated_at DESC,id').fetchall())]
+            if mission_id:
+                scopes.append(('Project',c.execute('SELECT pm.content FROM project_memories pm JOIN project_missions link ON link.project_id=pm.project_id WHERE link.mission_id=? ORDER BY pm.updated_at DESC,pm.id',(mission_id,)).fetchall()))
+            for label, entries in scopes:
+                for entry in entries:
+                    text=label+': '+redact_text(entry['content'],keys)
+                    if memory_size+len(text)>8000: continue
+                    memory.append(text);memory_size+=len(text)
         bot['memory']=[] if lab_step_id else memory
         now=time.time()
         chosen_profile=body.profile or bot['profile']
@@ -1193,6 +1204,101 @@ def delete_memory(bot_id: str, memory_id: str, request: Request):
     with db() as c:
         if not c.execute('DELETE FROM bot_memories WHERE id=? AND bot_id=?',(memory_id,bot_id)).rowcount: raise HTTPException(404,'Memory not found.')
     return {'ok':True}
+
+
+class LayerMemoryIn(BaseModel):
+    content: str = Field(min_length=1,max_length=4000)
+
+
+def layer_scope(c, project_id):
+    if project_id is None:
+        return 'shared_memories', '', ()
+    if not c.execute('SELECT 1 FROM projects WHERE id=?',(project_id,)).fetchone():
+        raise HTTPException(404,'Project not found.')
+    return 'project_memories', ' WHERE project_id=?', (project_id,)
+
+
+def layer_read(project_id):
+    keys=configured_secrets()
+    with db() as c:
+        table,where,params=layer_scope(c,project_id)
+        rows=[dict(r) for r in c.execute(f'SELECT * FROM {table}{where} ORDER BY updated_at DESC,id',params)]
+    for row in rows: row['content']=redact_text(row['content'],keys)
+    return rows
+
+
+def layer_write(project_id, body, memory_id=None):
+    content=redact_text(body.content.strip(),configured_secrets())
+    if not content: raise HTTPException(400,'Enter memory text.')
+    now=time.time()
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        table,where,params=layer_scope(c,project_id)
+        rows=c.execute(f'SELECT id,content FROM {table}{where}',params).fetchall()
+        previous=next((row for row in rows if row['id']==memory_id),None)
+        if memory_id and not previous: raise HTTPException(404,'Memory not found.')
+        if any(row['id']!=memory_id and normalized_memory(row['content'])==normalized_memory(content) for row in rows):
+            raise HTTPException(409,'That memory already exists.')
+        size=sum(len(row['content']) for row in rows)-(len(previous['content']) if previous else 0)+len(content)
+        if (not previous and len(rows)>=50) or size>32000: raise HTTPException(400,'Memory limit reached (50 entries or 32,000 characters).')
+        if previous:
+            c.execute(f"UPDATE {table} SET content=?,source='owner',source_ref=NULL,updated_at=? WHERE id=?",(content,now,memory_id))
+        else:
+            memory_id=str(uuid.uuid4())
+            if project_id is None:
+                c.execute('INSERT INTO shared_memories VALUES (?,?,?,?,?,?)',(memory_id,content,'owner',None,now,now))
+            else:
+                c.execute('INSERT INTO project_memories VALUES (?,?,?,?,?,?,?)',(memory_id,project_id,content,'owner',None,now,now))
+    return {'id':memory_id}
+
+
+def layer_delete(project_id, memory_id):
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        table,where,params=layer_scope(c,project_id)
+        where += ' AND id=?' if where else ' WHERE id=?'
+        if not c.execute(f'DELETE FROM {table}{where}',(*params,memory_id)).rowcount: raise HTTPException(404,'Memory not found.')
+    return {'ok':True}
+
+
+@app.get('/api/memory/shared')
+def list_shared_memory(request: Request):
+    require_auth(request);return layer_read(None)
+
+
+@app.post('/api/memory/shared')
+def add_shared_memory(body: LayerMemoryIn, request: Request):
+    require_auth(request);return layer_write(None,body)
+
+
+@app.put('/api/memory/shared/{memory_id}')
+def edit_shared_memory(memory_id: str, body: LayerMemoryIn, request: Request):
+    require_auth(request);return layer_write(None,body,memory_id)
+
+
+@app.delete('/api/memory/shared/{memory_id}')
+def delete_shared_memory(memory_id: str, request: Request):
+    require_auth(request);return layer_delete(None,memory_id)
+
+
+@app.get('/api/projects/{project_id}/memory')
+def list_project_memory(project_id: str, request: Request):
+    require_auth(request);return layer_read(project_id)
+
+
+@app.post('/api/projects/{project_id}/memory')
+def add_project_memory(project_id: str, body: LayerMemoryIn, request: Request):
+    require_auth(request);return layer_write(project_id,body)
+
+
+@app.put('/api/projects/{project_id}/memory/{memory_id}')
+def edit_project_memory(project_id: str, memory_id: str, body: LayerMemoryIn, request: Request):
+    require_auth(request);return layer_write(project_id,body,memory_id)
+
+
+@app.delete('/api/projects/{project_id}/memory/{memory_id}')
+def delete_project_memory(project_id: str, memory_id: str, request: Request):
+    require_auth(request);return layer_delete(project_id,memory_id)
 
 
 class ProjectIn(BaseModel):

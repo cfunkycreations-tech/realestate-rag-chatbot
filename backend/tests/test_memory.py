@@ -71,3 +71,56 @@ def test_capture_is_capped_and_does_not_learn_quoted_or_secret_text():
             c.execute('INSERT INTO bot_memories (id,bot_id,content,pinned,created_at,updated_at) VALUES (?,?,?,?,?,?)',(str(i),'b',f'Fact {i}',0,1,1))
         assert not capture(c,'b','message','I prefer short replies',2)
         assert c.execute("SELECT count(*) FROM bot_memories WHERE bot_id='b'").fetchone()[0]==50
+
+
+def test_shared_and_project_memory_owner_crud_is_scoped_and_redacted(monkeypatch):
+    with TestClient(service.app) as c:
+        assert c.get('/api/memory/shared').status_code==401
+        setup(c)
+        c.put('/api/settings/gateways/openrouter',json={'url':'https://example.com/v1','key':'private-key-abcdefgh12345'})
+        p=c.post('/api/projects',json={'name':'First'}).json()['id']
+        other=c.post('/api/projects',json={'name':'Second'}).json()['id']
+        shared=c.post('/api/memory/shared',json={'content':'Likes private-key-abcdefgh12345'}).json()['id']
+        assert 'private-key' not in c.get('/api/memory/shared').text
+        assert c.post('/api/memory/shared',json={'content':'LIKES [REDACTED]'}).status_code==409
+        assert c.put(f'/api/memory/shared/{shared}',json={'content':'Likes short answers'}).status_code==200
+        item=c.post(f'/api/projects/{p}/memory',json={'content':'Project deadline is Friday'}).json()['id']
+        assert c.get(f'/api/projects/{other}/memory').json()==[]
+        assert c.delete(f'/api/projects/{other}/memory/{item}').status_code==404
+        assert c.get('/api/projects/missing/memory').status_code==404
+        assert c.put(f'/api/projects/{p}/memory/{item}',json={'content':'Project deadline is Monday'}).status_code==200
+        assert c.get(f'/api/projects/{p}/memory').json()[0]['source']=='owner'
+        assert c.delete(f'/api/projects/{p}/memory/{item}').status_code==200
+        assert c.delete(f'/api/memory/shared/{shared}').status_code==200
+
+
+def test_shared_recall_for_every_bot_and_project_recall_only_for_linked_mission(monkeypatch):
+    payloads=[]
+    class Recording(FakeClient):
+        def stream(self,*args,**kwargs): payloads.append(kwargs['json']);return super().stream(*args,**kwargs)
+    monkeypatch.setattr(service.httpx,'AsyncClient',Recording)
+    with TestClient(service.app) as c:
+        setup(c);configure_budget(c)
+        bots=[c.post('/api/bots',json={'name':name}).json()['id'] for name in ('First','Second')]
+        project=c.post('/api/projects',json={'name':'Private project'}).json()['id']
+        c.post('/api/memory/shared',json={'content':'Shared preference'})
+        c.post(f'/api/projects/{project}/memory',json={'content':'Project-only fact'})
+        for bot in bots:
+            FakeClient.responses=[final_reply()]
+            run=c.post(f'/api/bots/{bot}/chat',json={'content':'Hello'}).json()['job_id']
+            c.get('/api/jobs/'+run+'/events')
+            prompt=payloads[-1]['messages'][0]['content']
+            assert 'Shared preference' in prompt and 'Project-only fact' not in prompt and 'untrusted' in prompt
+        # A linked queued mission is the only source of project context.
+        with service.db() as db:
+            db.execute("INSERT INTO missions VALUES ('queued','Work','Hello',NULL,'queued',NULL,NULL,1,1)")
+            db.execute("INSERT INTO mission_assignees VALUES ('queued',0,?)",(bots[0],))
+            db.execute("INSERT INTO project_missions VALUES (?, 'queued', 1)",(project,))
+        import asyncio
+        FakeClient.responses=[final_reply()]
+        async def run_linked():
+            job=await service.start_chat(bots[0],service.ChatIn(content='Hello'),mission_id='queued')
+            await service.jobs[job['job_id']]['task']
+        asyncio.run(run_linked())
+        prompt=payloads[-1]['messages'][0]['content']
+        assert 'Shared preference' in prompt and 'Project-only fact' in prompt
