@@ -402,6 +402,86 @@ def messages(bot_id: str, request: Request):
     with db() as c:
         return [dict(r) for r in c.execute('SELECT * FROM messages WHERE bot_id=? ORDER BY created_at',(bot_id,))]
 
+
+class ChatNameIn(BaseModel):
+    name: str = Field(min_length=1,max_length=160)
+
+
+def default_chat(c,bot_id):
+    chat_id='legacy-'+bot_id
+    if not c.execute('SELECT 1 FROM bots WHERE id=?',(bot_id,)).fetchone(): raise HTTPException(404,'Bot not found.')
+    c.execute("INSERT OR IGNORE INTO chats VALUES (?,?,?, ?,?)",(chat_id,bot_id,'Conversation',time.time(),time.time()))
+    # Adopt any legacy unlinked rows, including data created by older integrations.
+    c.execute("INSERT OR IGNORE INTO chat_messages SELECT ?,id FROM messages WHERE bot_id=? AND id NOT IN (SELECT message_id FROM chat_messages)",(chat_id,bot_id))
+    return chat_id
+
+
+@app.get('/api/bots/{bot_id}/chats')
+def list_chats(bot_id: str,request: Request,q: str = Query(default='',max_length=200)):
+    require_auth(request);keys=configured_secrets()
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE');default_chat(c,bot_id)
+        rows=c.execute("""SELECT chats.* FROM chats WHERE bot_id=? AND (?='' OR instr(lower(name),lower(?))>0 OR EXISTS
+            (SELECT 1 FROM chat_messages JOIN messages ON messages.id=chat_messages.message_id
+             WHERE chat_messages.chat_id=chats.id AND instr(lower(messages.content),lower(?))>0))
+             ORDER BY updated_at DESC,id LIMIT 100""",(bot_id,q,q,q)).fetchall()
+    return [redact_event_value(dict(row),keys) for row in rows]
+
+
+@app.post('/api/bots/{bot_id}/chats')
+def create_chat(bot_id: str,body: ChatNameIn,request: Request):
+    require_auth(request);name=redact(body.name.strip());now=time.time()
+    if not name: raise HTTPException(400,'Enter a chat name.')
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE');default_chat(c,bot_id)
+        if c.execute('SELECT count(*) FROM chats WHERE bot_id=?',(bot_id,)).fetchone()[0]>=100: raise HTTPException(400,'At most 100 chats per Bot are allowed.')
+        chat_id=str(uuid.uuid4());c.execute('INSERT INTO chats VALUES (?,?,?,?,?)',(chat_id,bot_id,name,now,now))
+    return {'id':chat_id}
+
+
+@app.put('/api/bots/{bot_id}/chats/{chat_id}')
+def rename_chat(bot_id: str,chat_id: str,body: ChatNameIn,request: Request):
+    require_auth(request);name=redact(body.name.strip())
+    if not name: raise HTTPException(400,'Enter a chat name.')
+    with db() as c:
+        result=c.execute('UPDATE chats SET name=?,updated_at=? WHERE bot_id=? AND id=?',(name,time.time(),bot_id,chat_id))
+        if not result.rowcount: raise HTTPException(404,'Chat not found.')
+    return {'id':chat_id}
+
+
+@app.delete('/api/bots/{bot_id}/chats/{chat_id}')
+def delete_chat(bot_id: str,chat_id: str,request: Request):
+    require_auth(request)
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        if not c.execute('SELECT 1 FROM chats WHERE id=? AND bot_id=?',(chat_id,bot_id)).fetchone(): raise HTTPException(404,'Chat not found.')
+        if c.execute("SELECT 1 FROM chat_runs JOIN runs ON runs.id=chat_runs.run_id WHERE chat_runs.chat_id=? AND runs.status IN ('queued','running','waiting_approval')",(chat_id,)).fetchone(): raise HTTPException(409,'Stop the active response before deleting this chat.')
+        c.execute('DELETE FROM messages WHERE id IN (SELECT message_id FROM chat_messages WHERE chat_id=?)',(chat_id,))
+        c.execute('DELETE FROM chats WHERE id=?',(chat_id,))
+    return {'deleted':True}
+
+
+@app.get('/api/bots/{bot_id}/chats/{chat_id}/messages')
+def chat_messages(bot_id: str,chat_id: str,request: Request):
+    require_auth(request)
+    with db() as c:
+        if not c.execute('SELECT 1 FROM chats WHERE id=? AND bot_id=?',(chat_id,bot_id)).fetchone(): raise HTTPException(404,'Chat not found.')
+        return [dict(row) for row in c.execute('SELECT messages.* FROM messages JOIN chat_messages ON chat_messages.message_id=messages.id WHERE chat_messages.chat_id=? ORDER BY messages.created_at,messages.rowid',(chat_id,))]
+
+
+@app.get('/api/bots/{bot_id}/chats/{chat_id}/latest-run')
+def chat_latest_run(bot_id: str,chat_id: str,request: Request):
+    require_auth(request)
+    with db() as c:
+        if not c.execute('SELECT 1 FROM chats WHERE id=? AND bot_id=?',(chat_id,bot_id)).fetchone(): raise HTTPException(404,'Chat not found.')
+        row=c.execute('SELECT runs.id,runs.status FROM runs JOIN chat_runs ON chat_runs.run_id=runs.id WHERE chat_runs.chat_id=? ORDER BY runs.created_at DESC LIMIT 1',(chat_id,)).fetchone()
+        if not row: return None
+        result=dict(row)
+        if result['status']=='failed':
+            last=c.execute("SELECT payload FROM run_events WHERE run_id=? AND event_type='error' ORDER BY id DESC LIMIT 1",(row['id'],)).fetchone()
+            result['message']=json.loads(last['payload']).get('message','The last response failed.') if last else 'The last response failed.'
+    return result
+
 class GatewayIn(BaseModel):
     url: str
     key: str | None = None
@@ -557,6 +637,7 @@ def save_web_policy(body: WebPolicy, request: Request):
 class ChatIn(BaseModel):
     content: str = Field(min_length=1,max_length=20000)
     profile: str | None = Field(default=None, pattern='^(fast|smart|thinker|vision|cheap-bulk)$')
+    chat_id: str | None = Field(default=None,max_length=160)
 
 ACTIVE_STATUSES = ('queued', 'running', 'waiting_approval')
 
@@ -639,6 +720,8 @@ def finish_run(job, status, kind, values=None, completion=None):
             if not job.get('lab_step_id'):
                 message_id = str(uuid.uuid4())
                 c.execute('INSERT INTO messages VALUES (?,?,?,?,?)', (message_id, bot_id, 'assistant', content, time.time()))
+                c.execute('INSERT INTO chat_messages VALUES (?,?)',(job['chat_id'],message_id))
+                c.execute('UPDATE chats SET updated_at=? WHERE id=?',(time.time(),job['chat_id']))
                 append_event(c, bot_id, job['id'], 'message.sent', {'message_id':message_id, 'role':'assistant', 'summary':content[:240]})
                 if not job.get('mission_id') and job.get('user_message_id'):
                     source=c.execute("SELECT content FROM messages WHERE id=? AND bot_id=? AND role='user'",(job['user_message_id'],bot_id)).fetchone()
@@ -840,7 +923,11 @@ async def start_chat(bot_id: str, body: ChatIn, mission_id: str | None = None, g
         now=time.time()
         chosen_profile=body.profile or bot['profile']
         entries=json.loads(c.execute('SELECT value FROM config WHERE key=?', ('profiles',)).fetchone()['value']).get(chosen_profile,[])
-        previous=[{'role':r['role'],'content':r['content']} for r in c.execute('SELECT role,content FROM messages WHERE bot_id=? ORDER BY created_at DESC LIMIT 39',(bot_id,)).fetchall()][::-1]
+        chat_id=None
+        if not lab_step_id:
+            chat_id=body.chat_id or default_chat(c,bot_id)
+            if not c.execute('SELECT 1 FROM chats WHERE id=? AND bot_id=?',(chat_id,bot_id)).fetchone(): raise HTTPException(404,'Chat not found.')
+        previous=[{'role':r['role'],'content':r['content']} for r in c.execute('SELECT messages.role,messages.content FROM messages JOIN chat_messages ON chat_messages.message_id=messages.id WHERE chat_messages.chat_id=? ORDER BY messages.created_at DESC,messages.rowid DESC LIMIT 39',(chat_id,)).fetchall()][::-1]
         model_input=content
         invocation=parse_invocation(content) if not lab_step_id and not mission_id else None
         if invocation:
@@ -860,6 +947,7 @@ async def start_chat(bot_id: str, body: ChatIn, mission_id: str | None = None, g
             reserve(c, job_id, bot_id, chosen_profile, now, attempts=len(entries))
         except BudgetError as exc: raise HTTPException(402, str(exc)) from exc
         c.execute('INSERT INTO runs VALUES (?,?,?,?,?)', (job_id,bot_id,'running',now,now))
+        if chat_id: c.execute('INSERT INTO chat_runs VALUES (?,?)',(chat_id,job_id))
         if mission_id:
             c.execute('INSERT INTO mission_runs VALUES (?,?,?,?,?,?,?,?,?,?)',(str(uuid.uuid4()),mission_id,bot_id,job_id,mission_role,'running',None,None,now,now))
             c.execute("UPDATE missions SET status='running',updated_at=? WHERE id=?",(now,mission_id))
@@ -871,8 +959,10 @@ async def start_chat(bot_id: str, body: ChatIn, mission_id: str | None = None, g
         if not lab_step_id:
             message_id = str(uuid.uuid4())
             c.execute('INSERT INTO messages VALUES (?,?,?,?,?)',(message_id,bot_id,'user',content,now))
+            c.execute('INSERT INTO chat_messages VALUES (?,?)',(chat_id,message_id))
+            c.execute('UPDATE chats SET updated_at=? WHERE id=?',(now,chat_id))
             append_event(c, bot_id, job_id, 'message.sent', {'message_id':message_id, 'role':'user', 'summary':content[:240]})
-    job={'id':job_id,'bot_id':bot_id,'done':False,'created':time.time(),'notify':asyncio.Event(),'entries':entries,'max_completion_tokens':price['max_completion_tokens'],'max_prompt_tokens':price['max_prompt_tokens'],'secrets':set(keys),'mission_id':mission_id,'group_managed':group_managed,'lab_step_id':lab_step_id,'user_message_id':message_id if not lab_step_id else None}; jobs[job_id]=job
+    job={'id':job_id,'bot_id':bot_id,'done':False,'created':time.time(),'notify':asyncio.Event(),'entries':entries,'max_completion_tokens':price['max_completion_tokens'],'max_prompt_tokens':price['max_prompt_tokens'],'secrets':set(keys),'mission_id':mission_id,'group_managed':group_managed,'lab_step_id':lab_step_id,'user_message_id':message_id if not lab_step_id else None,'chat_id':chat_id}; jobs[job_id]=job
     policy=WebPolicy.model_validate_json(config('web_policy','{}'))
     context=ToolContext(db,DATA,job_id,bot_id,lambda text:redact_text(text,list(job['secrets'])),policy.allow,policy.deny,lambda _:None)
     job['tool_bridge']=ToolBridge(context,lambda item:tool_event(job,item))
