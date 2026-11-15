@@ -14,13 +14,14 @@ async function proxy(request: NextRequest, {params}: {params: Promise<{path: str
   try {
     let body: ArrayBuffer | undefined;
     if (!['GET', 'HEAD'].includes(request.method)) {
-      if (request.method === 'POST' && path.length === 5 && path[0] === 'bots' && path[2] === 'chats' && path[4] === 'attachments' && request.body) {
+      if (request.method === 'POST' && request.body && ((path.length === 5 && path[0] === 'bots' && path[2] === 'chats' && path[4] === 'attachments') || (path.length === 2 && path[0] === 'workspace' && path[1] === 'restore'))) {
+        const maxBytes=path[0]==='workspace'?260*1024*1024:2*1024*1024+65536;
         // Bound multipart buffering at the public proxy even without Content-Length.
         const reader=request.body.getReader(), chunks:Uint8Array[]=[];let total=0;
         while (true) {
           const {done,value}=await reader.read();if(done)break;
           total+=value.byteLength;
-          if(total>2*1024*1024+65536){await reader.cancel();return Response.json({detail:'Attachment request is too large.'},{status:413})}
+          if(total>maxBytes){await reader.cancel();return Response.json({detail:'Upload request is too large.'},{status:413})}
           chunks.push(value);
         }
         const bytes=new Uint8Array(total);let offset=0;for(const chunk of chunks){bytes.set(chunk,offset);offset+=chunk.byteLength}body=bytes.buffer;

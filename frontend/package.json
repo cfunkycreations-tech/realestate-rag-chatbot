@@ -31,7 +31,8 @@
     "test:chats": "node scripts/chats-e2e.mjs",
     "test:pwa": "node scripts/pwa-e2e.mjs",
     "test:attachments": "node scripts/attachments-e2e.mjs",
-    "test:tool-policies": "node scripts/tool-policies-e2e.mjs"
+    "test:tool-policies": "node scripts/tool-policies-e2e.mjs",
+    "test:backup": "node scripts/backup-e2e.mjs"
   },
   "dependencies": {
     "@tanstack/react-virtual": "^3.14.26",

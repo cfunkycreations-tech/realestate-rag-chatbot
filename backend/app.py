@@ -1,6 +1,7 @@
 """Funk Bot: local-first, single-user chat service."""
 import asyncio
 import base64
+import tempfile
 import subprocess
 import sys
 import csv
@@ -38,6 +39,9 @@ from funkbot.redaction import SlidingRedactor, redact_text
 from funkbot.memory_capture import capture as capture_memory, normalized as normalized_memory
 from funkbot.skills import parse_invocation, parse_markdown
 from funkbot.schedule import next_occurrence
+from funkbot.backup import create as create_backup, restore as stage_restore, BackupError, MAX_TOTAL as MAX_BACKUP_TOTAL
+from alembic.config import Config as AlembicConfig
+from alembic.script import ScriptDirectory
 from funkbot.vault import MAX_ARCHIVE, VaultError, character_for_bot, draw_character, import_zip
 from funkbot.budget import BudgetError, NANOS_PER_DOLLAR, dollars_to_nanos, limit_to_nanos, limits_for, reconcile_run, reconcile_usage, reserve, reserve_followup, settle, token_cost_nanos
 from funkbot.tool_policy import WebPolicy
@@ -61,7 +65,8 @@ def get_or_create_key(name, factory):
     return path.read_text().strip()
 
 cipher = Fernet(get_or_create_key('vault.key', lambda: Fernet.generate_key().decode()).encode())
-session_secret = os.environ.get('FUNK_SESSION_SECRET') or get_or_create_key('session.key', lambda: secrets.token_urlsafe(48))
+local_session_secret = get_or_create_key('session.key', lambda: secrets.token_urlsafe(48))
+session_secret = os.environ.get('FUNK_SESSION_SECRET') or local_session_secret
 signer = URLSafeTimedSerializer(session_secret, salt='funk-session')
 ph = PasswordHasher()
 DB = DATA / 'funk.db'
@@ -170,6 +175,71 @@ async def put_global_pause(body: PauseIn, request: Request):
             if not task.done(): task.cancel();tasks.add(task)
         if tasks: await asyncio.gather(*tasks,return_exceptions=True)
     return {'paused':body.paused}
+
+@app.get('/api/workspace/backup')
+def download_workspace_backup(request: Request):
+    require_auth(request)
+    if config('global_pause','0')!='1': raise HTTPException(409,'Pause all Bots before creating a backup.')
+    if any(not job.get('done') for job in jobs.values()): raise HTTPException(409,'Wait for active responses to stop.')
+    output=tempfile.TemporaryFile()
+    try:
+        create_backup(DATA,DB,output);output.seek(0)
+    except (BackupError,OSError) as exc:
+        output.close();raise HTTPException(400,str(exc)) from exc
+    def content():
+        try:
+            while chunk:=output.read(1024*1024): yield chunk
+        finally: output.close()
+    return StreamingResponse(content(),media_type='application/zip',headers={'Content-Disposition':'attachment; filename="funk-bot-workspace.zip"','Cache-Control':'no-store','X-Content-Type-Options':'nosniff'})
+
+
+@app.post('/api/workspace/restore')
+async def upload_workspace_restore(request: Request):
+    require_auth(request)
+    if config('global_pause','0')!='1': raise HTTPException(409,'Pause all Bots before staging a restore.')
+    if any(not job.get('done') for job in jobs.values()): raise HTTPException(409,'Wait for active responses to stop.')
+    if request.headers.get('content-type','').split(';',1)[0].strip().lower()!='application/zip': raise HTTPException(415,'Upload a ZIP backup.')
+    with tempfile.TemporaryDirectory(prefix='funk-restore-') as temp:
+        path=Path(temp)/'upload.zip';size=0
+        with path.open('wb') as target:
+            async for chunk in request.stream():
+                size+=len(chunk)
+                if size>MAX_BACKUP_TOTAL+4*1024*1024: raise HTTPException(413,'Backup is too large.')
+                target.write(chunk)
+        cfg=AlembicConfig();cfg.set_main_option('script_location',str(Path(__file__).parent/'funkbot'/'migrations'))
+        head=ScriptDirectory.from_config(cfg).get_current_head()
+        try: result=stage_restore(path,DATA,head)
+        except BackupError as exc: raise HTTPException(400,str(exc)) from exc
+    return {'staged_id':result.name,'restart_required':True}
+
+
+@app.get('/api/workspace/restores')
+def list_workspace_restores(request: Request):
+    require_auth(request)
+    root=DATA/'restores'
+    if root.is_symlink(): raise HTTPException(400,'Unsafe restore directory.')
+    if not root.exists(): return []
+    results=[]
+    for path in root.iterdir():
+        try:
+            if path.is_symlink() or not path.is_dir() or str(uuid.UUID(path.name))!=path.name: continue
+        except ValueError: continue
+        results.append({'id':path.name,'created_at':path.stat().st_mtime})
+    return sorted(results,key=lambda item:item['created_at'],reverse=True)
+
+
+@app.delete('/api/workspace/restore/{stage_id}')
+def delete_workspace_restore(stage_id: str, request: Request):
+    require_auth(request)
+    try:
+        if str(uuid.UUID(stage_id)) != stage_id: raise ValueError()
+    except ValueError: raise HTTPException(404,'Restore stage not found.')
+    root=DATA/'restores';target=root/stage_id
+    if root.is_symlink() or target.is_symlink() or not target.is_dir(): raise HTTPException(404,'Restore stage not found.')
+    import shutil
+    shutil.rmtree(target)
+    return {'ok':True}
+
 
 class Password(BaseModel):
     password: str = Field(min_length=8, max_length=256)

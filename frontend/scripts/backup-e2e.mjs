@@ -1,0 +1,13 @@
+// Only use a fresh disposable Funk Bot installation: this creates data.
+import assert from 'node:assert/strict';import path from 'node:path';import {fileURLToPath} from 'node:url';import {chromium} from '@playwright/test';
+const here=path.dirname(fileURLToPath(import.meta.url)),base=process.env.E2E_URL,token=process.env.E2E_SETUP_TOKEN;if(!base||!token)throw Error('Set E2E_URL and E2E_SETUP_TOKEN.');
+const browser=await chromium.launch({headless:true,args:['--no-sandbox'],...(process.env.E2E_CHROMIUM?{executablePath:process.env.E2E_CHROMIUM}:{})});
+try{const page=await browser.newPage({viewport:{width:1440,height:900},reducedMotion:'reduce'}),req=page.request,errors=[];page.on('pageerror',e=>errors.push(e.message));
+ assert.equal((await req.post(base+'/api/auth/setup',{data:{password:'disposable-test-password',setup_token:token}})).status(),200);
+ assert.equal((await req.post(base+'/api/bots',{data:{name:'Backup Bot',title:'Tester'}})).status(),200);
+ assert.equal((await req.put(base+'/api/control/pause',{data:{paused:true}})).status(),200);
+ await page.goto(base);await page.getByRole('button',{name:'Open settings'}).click();const dialog=page.getByRole('dialog');await dialog.getByRole('button',{name:'Backup',exact:true}).click();
+ const downloadEvent=page.waitForEvent('download');await dialog.getByRole('button',{name:'Download workspace backup'}).click();const download=await downloadEvent;assert.equal(download.suggestedFilename(),'funk-bot-workspace.zip');const file=await download.path();assert(file);
+ await req.post(base+'/api/bots',{data:{name:'Later Bot',title:'Tester'}});await dialog.getByLabel('Workspace backup ZIP').setInputFiles(file);page.once('dialog',d=>d.accept());await dialog.getByRole('button',{name:'Validate and stage restore'}).click();await dialog.getByText('Backup validated and staged.',{exact:false}).waitFor();const stages=await (await req.get(base+'/api/workspace/restores')).json();assert.equal(stages.length,1);assert.equal((await (await req.get(base+'/api/bots')).json()).length,2);console.log('Staged restore ID: '+stages[0].id);
+ await dialog.locator('.backup-settings').scrollIntoViewIfNeeded();await page.screenshot({path:path.join(here,'../../docs/screenshots/backup-desktop.png')});await page.setViewportSize({width:390,height:844});await dialog.locator('.backup-settings').scrollIntoViewIfNeeded();await page.screenshot({path:path.join(here,'../../docs/screenshots/backup-mobile.png')});assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));assert.deepEqual(errors,[]);console.log('Backup download and non-destructive restore staging passed.');
+}finally{await browser.close()}
