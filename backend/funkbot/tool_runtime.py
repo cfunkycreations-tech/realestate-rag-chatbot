@@ -22,6 +22,7 @@ class ToolContext:
     notify: Callable[[dict], None]
     # The broader approval is deliberately run-scoped, not permanent.
     run_grants: set[str] = field(default_factory=set)
+    policy_for: Callable = lambda c,name,risk: 'auto' if risk=='read' else 'ask'
 
 
 def live(c, context):
@@ -39,16 +40,24 @@ async def execute(context: ToolContext, name: str, args: dict, wait_decision):
     """
     with context.db() as c:
         c.execute('BEGIN IMMEDIATE');live(c,context)
-        call=tool_audit.propose(c,context.run_id,context.bot_id,name,args,context.redact)
+        spec=tools.REGISTRY.get(name)
+        if not spec: raise tools.ToolError('Unknown tool.')
+        policy=context.policy_for(c,name,spec.risk)
+        call=tool_audit.propose(c,context.run_id,context.bot_id,name,args,context.redact,policy=policy)
         row=dict(c.execute('SELECT * FROM tool_calls WHERE id=?',(call,)).fetchone())
     try:
         context.notify({'type':'tool.proposed','call_id':call,'tool':name,'risk':row['risk'],'arguments':json.loads(row['arguments']),'status':row['status']})
+        if row['status']=='denied':
+            context.notify({'type':'tool.decision','call_id':call,'decision':'policy_denied','status':'denied'})
+            return {'status':'denied','message':'The owner tool policy denied this call.'}
         if row['status']=='pending':
             granted=name in context.run_grants
             decision='run_grant' if granted else await wait_decision(call)
             with context.db() as c:
                 c.execute('BEGIN IMMEDIATE');live(c,context)
-                if granted:
+                if context.policy_for(c,name,row['risk'])=='deny':
+                    tool_audit.deny_policy_change(c,call);status='denied';decision='policy_denied';granted=True
+                elif granted:
                     tool_audit.approve_from_run_grant(c,call);status='approved'
                 else:
                     status=tool_audit.decide(c,call,decision)
@@ -56,7 +65,14 @@ async def execute(context: ToolContext, name: str, args: dict, wait_decision):
             context.notify({'type':'tool.decision','call_id':call,'decision':decision,'status':status})
             if status=='denied': return {'status':'denied','message':'The owner denied this tool call.'}
         with context.db() as c:
-            c.execute('BEGIN IMMEDIATE');live(c,context);row=tool_audit.claim(c,call)
+            c.execute('BEGIN IMMEDIATE');live(c,context)
+            current=context.policy_for(c,name,row['risk'])
+            if current=='deny' or (policy=='auto' and current!='auto'):
+                tool_audit.deny_policy_change(c,call);blocked=True
+            else: row=tool_audit.claim(c,call);blocked=False
+        if blocked:
+            context.notify({'type':'tool.decision','call_id':call,'decision':'policy_denied','status':'denied'})
+            return {'status':'denied','message':'Tool policy changed before execution.'}
         safe_args=json.loads(row['arguments'])
         try:
             if name=='web_fetch': result=await tools.web_fetch(tools.WebFetchArgs.model_validate(safe_args),context.allow,context.deny)

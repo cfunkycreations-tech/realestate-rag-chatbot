@@ -10,7 +10,7 @@ def audit(c, call_id, action, now):
     c.execute('INSERT INTO tool_audit (call_id,action,created_at) VALUES (?,?,?)', (call_id,action,now))
 
 
-def propose(c, run_id, bot_id, name, arguments, redact, now=None):
+def propose(c, run_id, bot_id, name, arguments, redact, now=None, policy=None):
     """Validate and redact before persistence; caller owns a write transaction."""
     spec=REGISTRY.get(name)
     if not spec: raise ToolError('Unknown tool.')
@@ -26,18 +26,21 @@ def propose(c, run_id, bot_id, name, arguments, redact, now=None):
     except ValidationError as exc:
         raise ToolError('Redacted tool arguments are invalid.') from exc
     call_id=str(uuid.uuid4());now=time.time() if now is None else now
-    status='approved' if spec.risk=='read' else 'pending'
+    policy=policy or ('auto' if spec.risk=='read' else 'ask')
+    if policy not in ('auto','ask','deny') or (policy=='auto' and spec.risk!='read'): raise ToolError('Invalid tool policy.')
+    status='denied' if policy=='deny' else 'approved' if policy=='auto' else 'pending'
     c.execute('''INSERT INTO tool_calls (id,run_id,bot_id,tool_name,risk,arguments,status,created_at,updated_at)
                  VALUES (?,?,?,?,?,?,?,?,?)''', (call_id,run_id,bot_id,name,spec.risk,json.dumps(cleaned),status,now,now))
     audit(c,call_id,'proposed',now)
     if status=='approved': audit(c,call_id,'read_auto_approved',now)
+    if status=='denied': audit(c,call_id,'policy_denied',now)
     return call_id
 
 
 def decide(c, call_id, decision, now=None):
     if decision not in ('approve','approve_once','deny'): raise ToolError('Invalid approval decision.')
     row=c.execute('SELECT risk,status FROM tool_calls WHERE id=?', (call_id,)).fetchone()
-    if not row or row['risk'] not in ('write','send','spend') or row['status']!='pending': raise ToolError('This approval is no longer pending.')
+    if not row or row['risk'] not in ('read','write','send','spend') or row['status']!='pending': raise ToolError('This approval is no longer pending.')
     now=time.time() if now is None else now
     status='denied' if decision=='deny' else 'approved'
     c.execute('UPDATE tool_calls SET status=?,updated_at=? WHERE id=?', (status,now,call_id))
@@ -71,7 +74,7 @@ def finish(c, call_id, result, success, redact, now=None):
 def approve_from_run_grant(c, call_id, now=None):
     """Use a grant that exists only for the current, live run."""
     now=time.time() if now is None else now
-    changed=c.execute("UPDATE tool_calls SET status='approved',updated_at=? WHERE id=? AND risk IN ('write','send','spend') AND status='pending'", (now,call_id))
+    changed=c.execute("UPDATE tool_calls SET status='approved',updated_at=? WHERE id=? AND risk IN ('read','write','send','spend') AND status='pending'", (now,call_id))
     if not changed.rowcount: raise ToolError('This approval is no longer pending.')
     audit(c,call_id,'run_grant',now)
 
@@ -81,3 +84,10 @@ def abort(c, call_id, reason, redact, now=None):
     now=time.time() if now is None else now
     changed=c.execute("UPDATE tool_calls SET status='failed',result=?,updated_at=? WHERE id=? AND status IN ('pending','approved','running')", (json.dumps({'error':redact(reason)}),now,call_id))
     if changed.rowcount: audit(c,call_id,'interrupted',now)
+
+
+def deny_policy_change(c,call_id,now=None):
+    now=time.time() if now is None else now
+    changed=c.execute("UPDATE tool_calls SET status='denied',updated_at=? WHERE id=? AND status IN ('pending','approved')",(now,call_id))
+    if not changed.rowcount: raise ToolError('This tool call is no longer awaiting execution.')
+    audit(c,call_id,'policy_denied',now)

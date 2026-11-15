@@ -735,6 +735,31 @@ def save_web_policy(body: WebPolicy, request: Request):
     return body.model_dump()
 
 
+class ToolPoliciesIn(BaseModel):
+    web_fetch: Literal['auto','ask','deny']
+    write_note: Literal['ask','deny']
+    create_followup: Literal['ask','deny']
+
+
+def tool_policy_for(c,name,risk):
+    row=c.execute("SELECT value FROM config WHERE key='tool_policies'").fetchone()
+    try: values=json.loads(row['value']) if row else {}
+    except (TypeError,ValueError): return 'deny'
+    value=values.get(name,'auto' if risk=='read' else 'ask') if isinstance(values,dict) else 'deny'
+    return value if value in ('auto','ask','deny') and not (value=='auto' and risk!='read') else 'deny'
+
+
+@app.get('/api/settings/tool-policies')
+def get_tool_policies(request: Request):
+    require_auth(request)
+    with db() as c: return {name:tool_policy_for(c,name,risk) for name,risk in [('web_fetch','read'),('write_note','write'),('create_followup','write')]}
+
+
+@app.put('/api/settings/tool-policies')
+def put_tool_policies(body: ToolPoliciesIn,request: Request):
+    require_auth(request);set_config('tool_policies',body.model_dump_json());return body.model_dump()
+
+
 class ChatIn(BaseModel):
     content: str = Field(min_length=1,max_length=20000)
     profile: str | None = Field(default=None, pattern='^(fast|smart|thinker|vision|cheap-bulk)$')
@@ -1077,7 +1102,7 @@ async def start_chat(bot_id: str, body: ChatIn, mission_id: str | None = None, g
             append_event(c, bot_id, job_id, 'message.sent', {'message_id':message_id, 'role':'user', 'summary':content[:240]})
     job={'id':job_id,'bot_id':bot_id,'done':False,'created':time.time(),'notify':asyncio.Event(),'entries':entries,'max_completion_tokens':price['max_completion_tokens'],'max_prompt_tokens':price['max_prompt_tokens'],'secrets':set(keys),'mission_id':mission_id,'group_managed':group_managed,'lab_step_id':lab_step_id,'user_message_id':message_id if not lab_step_id else None,'chat_id':chat_id}; jobs[job_id]=job
     policy=WebPolicy.model_validate_json(config('web_policy','{}'))
-    context=ToolContext(db,DATA,job_id,bot_id,lambda text:redact_text(text,list(job['secrets'])),policy.allow,policy.deny,lambda _:None)
+    context=ToolContext(db,DATA,job_id,bot_id,lambda text:redact_text(text,list(job['secrets'])),policy.allow,policy.deny,lambda _:None,policy_for=tool_policy_for)
     job['tool_bridge']=ToolBridge(context,lambda item:tool_event(job,item))
     job['task']=asyncio.create_task(run_chat(job,bot,history,body.profile or bot['profile']))
     def finish_unexpected(task):

@@ -254,3 +254,7 @@ Import accepts UTF-8 `SKILL.md` files up to 32 KB in either a simple `#` title w
 ### Event export
 
 In **Settings → Tool audit**, export the recorded account event log as JSON or CSV. The authenticated export streams in event order and reapplies known-secret filtering, but no filter is complete. Exports are private and may include message summaries. CSV cells that resemble spreadsheet formulas are prefixed for safety. This is an event export, not a complete tool-audit export or workspace backup. Deleting a Bot deletes its event history.
+
+### Tool review policies
+
+Settings → Web access includes owner-controlled review policies for the available tools. Public web reads may be automatic, ask, or deny; workspace note and follow-up writes may only ask or deny. Host allow/deny and SSRF checks still apply. A response-scoped approval grants only that tool for the current run, and a deny policy is checked again before claiming an action. Policy changes cannot cancel or undo actions already started. Connector and computer tools are not implemented.
