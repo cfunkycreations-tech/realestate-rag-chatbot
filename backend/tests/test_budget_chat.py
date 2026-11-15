@@ -136,3 +136,33 @@ def test_deleting_bot_preserves_budget_usage_and_saved_key(monkeypatch):
             assert db.execute('SELECT bot_id FROM usage').fetchone()['bot_id'] is None
             row=db.execute('SELECT bot_id,status,actual_nanos FROM budget_reservations').fetchone()
             assert row['bot_id']==bot and row['status']=='settled' and row['actual_nanos']==300_000
+
+
+def test_restart_marks_followup_charge_uncertain_and_interrupts_pending_tool():
+    from funkbot.budget import reserve, reserve_followup, settle
+    from funkbot.tool_audit import propose
+    with TestClient(service.app) as client:
+        setup(client);configure_budget(client)
+        bot=client.post('/api/bots',json={'name':'Scout'}).json()['id']
+        with service.db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            db.execute('INSERT INTO runs VALUES (?,?,?,?,?)',('parent',bot,'running',time.time(),time.time()))
+            reserve(db,'parent',bot,'smart',time.time())
+            db.execute('INSERT INTO usage (bot_id,prompt_tokens,completion_tokens,created_at) VALUES (?,?,?,?)',(bot,20,10,time.time()))
+            settle(db,'parent',db.execute('SELECT last_insert_rowid()').fetchone()[0],20,10)
+            followup,_=reserve_followup(db,'parent',bot,'smart',time.time())
+            call=propose(db,'parent',bot,'write_note',{'filename':'not-written.txt','content':'safe'},lambda text:text)
+    service.mark_interrupted_runs()
+    service.mark_interrupted_runs()  # recovery is idempotent
+    with service.db() as db:
+        assert db.execute('SELECT status FROM budget_reservations WHERE run_id=?',('parent',)).fetchone()['status']=='settled'
+        assert db.execute('SELECT status FROM budget_reservations WHERE run_id=?',(followup,)).fetchone()['status']=='uncertain'
+        assert db.execute('SELECT status FROM tool_calls WHERE id=?',(call,)).fetchone()['status']=='failed'
+        assert [r['action'] for r in db.execute('SELECT action FROM tool_audit WHERE call_id=? ORDER BY id',(call,))]==['proposed','interrupted']
+    assert not (service.DATA/'workspaces'/bot/'not-written.txt').exists()
+    with TestClient(service.app) as client:
+        assert client.post('/api/auth/login',json={'password':'correct horse battery staple'}).status_code==200
+        assert client.post(f'/api/bots/{bot}/chat',json={'content':'Again'}).status_code==402
+        assert client.post(f'/api/budget/reconcile/run/{followup}',json={'amount':'0.01','source':'Verified provider statement'}).status_code==200
+        with service.db() as db:
+            assert db.execute('SELECT status FROM budget_reservations WHERE run_id=?',(followup,)).fetchone()['status']=='settled'

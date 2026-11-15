@@ -12,6 +12,7 @@ from decimal import Decimal
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlparse
+from typing import Literal
 
 import httpx
 from argon2 import PasswordHasher
@@ -30,6 +31,8 @@ from funkbot.redaction import SlidingRedactor, redact_text
 from funkbot.vault import MAX_ARCHIVE, VaultError, character_for_bot, draw_character, import_zip
 from funkbot.budget import BudgetError, NANOS_PER_DOLLAR, dollars_to_nanos, limit_to_nanos, limits_for, reconcile_run, reconcile_usage, reserve, settle, token_cost_nanos
 from funkbot.tool_policy import WebPolicy
+from funkbot.tools import ToolError
+from funkbot.tool_audit import abort as abort_tool
 
 DATA = Path(os.environ.get('FUNK_DATA_DIR', Path(__file__).parent.parent / 'data'))
 DATA.mkdir(parents=True, exist_ok=True)
@@ -487,7 +490,12 @@ def mark_interrupted_runs():
         for row in rows:
             record_event(c, row['id'], 'bot.state_changed', {'state':'error'})
             record_event(c, row['id'], 'error', {'message':'The backend restarted before this response finished. Please try again.'})
-            c.execute("UPDATE budget_reservations SET status='uncertain' WHERE run_id=? AND status='reserved'", (row['id'],))
+            # A run can have multiple separately reserved model rounds. A
+            # restart cannot prove whether any outstanding request was sent.
+            c.execute("UPDATE budget_reservations SET status='uncertain' WHERE (run_id=? OR parent_run_id=?) AND status='reserved'", (row['id'],row['id']))
+            pending = c.execute("SELECT id FROM tool_calls WHERE run_id=? AND status IN ('pending','approved','running')", (row['id'],)).fetchall()
+            for call in pending:
+                abort_tool(c,call['id'],'Backend restarted; tool outcome may be unknown.',lambda text:text)
             c.execute("UPDATE runs SET status='failed', updated_at=? WHERE id=?", (time.time(), row['id']))
             append_event(c, row['bot_id'], row['id'], 'run.finished', {'status':'failed'})
 
@@ -696,6 +704,40 @@ async def job_events(job_id: str, request: Request, after: int = 0):
             except asyncio.TimeoutError:
                 yield ': keep-alive\n\n'
     return StreamingResponse(stream(),media_type='text/event-stream',headers={'Cache-Control':'no-cache','X-Accel-Buffering':'no'})
+
+class ToolDecisionIn(BaseModel):
+    decision: Literal['approve','approve_once','deny']
+
+
+@app.get('/api/jobs/{job_id}/tool-calls')
+def job_tool_calls(job_id: str, request: Request):
+    require_auth(request)
+    with db() as c:
+        if not c.execute('SELECT 1 FROM runs WHERE id=?',(job_id,)).fetchone(): raise HTTPException(404,'Run not found.')
+        rows=c.execute('SELECT * FROM tool_calls WHERE run_id=? ORDER BY created_at,id LIMIT 200',(job_id,)).fetchall()
+        calls=[]
+        for row in rows:
+            call=dict(row)
+            call['arguments']=json.loads(call['arguments'])
+            call['result']=json.loads(call['result']) if call['result'] is not None else None
+            call['audit']=[dict(item) for item in c.execute('SELECT action,created_at FROM tool_audit WHERE call_id=? ORDER BY id',(call['id'],)).fetchall()]
+            calls.append(call)
+    return calls
+
+
+@app.post('/api/jobs/{job_id}/tool-calls/{call_id}/decision')
+async def decide_tool_call(job_id: str, call_id: str, body: ToolDecisionIn, request: Request):
+    require_auth(request)
+    with db() as c:
+        row=c.execute('SELECT tool_calls.status, runs.status AS run_status FROM tool_calls JOIN runs ON runs.id=tool_calls.run_id WHERE tool_calls.id=? AND tool_calls.run_id=?',(call_id,job_id)).fetchone()
+    if not row: raise HTTPException(404,'Tool call not found.')
+    bridge=jobs.get(job_id,{}).get('tool_bridge')
+    if row['status']!='pending' or row['run_status'] not in ACTIVE_STATUSES or bridge is None:
+        raise HTTPException(409,'This approval is no longer pending.')
+    try: bridge.submit(call_id,body.decision)
+    except ToolError as exc: raise HTTPException(409,str(exc)) from exc
+    return {'ok':True}
+
 
 @app.post('/api/jobs/{job_id}/stop')
 async def stop_job(job_id: str, request: Request):
