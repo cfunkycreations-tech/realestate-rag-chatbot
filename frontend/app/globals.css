@@ -131,3 +131,5 @@
 .due-notice{flex-shrink:0;text-align:center;background:#604020;border-bottom:1px solid #e6c273;color:#fff4d7;font-size:12px;font-weight:700;padding:8px;cursor:pointer}
 
 .handoff-panel{flex-shrink:0;max-height:40%;overflow:auto;background:#18101f;border-bottom:1px solid #745082;padding:7px 14px}.handoff-panel summary{position:sticky;top:0;z-index:1;background:#18101f;padding:4px 0;font-weight:700;color:#efd7ff;cursor:pointer}.handoff-inner{padding-top:8px}.handoff-inner form{display:flex;flex-direction:column;gap:5px}.handoff-inner form button{align-self:flex-start}.handoff-inner .tool-card{margin:8px 0}.handoff-inner p{overflow-wrap:anywhere}
+
+.routine-actions{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}.routines-view .mission-form{margin-top:16px}.routines-view .mission-detail p{overflow-wrap:anywhere}

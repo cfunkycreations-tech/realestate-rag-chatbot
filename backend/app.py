@@ -34,6 +34,7 @@ from funkbot.auth_security import ensure_setup_token, lockout_seconds
 from funkbot.redaction import SlidingRedactor, redact_text
 from funkbot.memory_capture import capture as capture_memory, normalized as normalized_memory
 from funkbot.skills import parse_invocation, parse_markdown
+from funkbot.schedule import next_occurrence
 from funkbot.vault import MAX_ARCHIVE, VaultError, character_for_bot, draw_character, import_zip
 from funkbot.budget import BudgetError, NANOS_PER_DOLLAR, dollars_to_nanos, limit_to_nanos, limits_for, reconcile_run, reconcile_usage, reserve, reserve_followup, settle, token_cost_nanos
 from funkbot.tool_policy import WebPolicy
@@ -117,7 +118,11 @@ async def lifespan(_app: FastAPI):
         logging.getLogger('uvicorn.error').warning(
             'Funk Bot first-run setup code (enter this in the setup screen): %s', token
         )
-    yield
+    scheduler=asyncio.create_task(routine_scheduler())
+    try: yield
+    finally:
+        scheduler.cancel()
+        await asyncio.gather(scheduler,return_exceptions=True)
 
 app = FastAPI(title='Funk Bot', lifespan=lifespan)
 jobs = {}
@@ -293,11 +298,16 @@ def duplicate_bot(bot_id: str, request: Request):
         c.execute('BEGIN IMMEDIATE')
         bot=c.execute('SELECT * FROM bots WHERE id=?',(bot_id,)).fetchone()
         if not bot: raise HTTPException(404,'Bot not found.')
+        routines=c.execute('SELECT * FROM routines WHERE bot_id=?',(bot_id,)).fetchall()
+        if c.execute('SELECT count(*) FROM routines').fetchone()[0]+len(routines)>50: raise HTTPException(400,'Duplicating these routines would exceed the 50-routine limit.')
         name=redact_text(bot['name'],keys)[:113]+' (copy)'
         c.execute('INSERT INTO bots VALUES (?,?,?,?,?,?,?,?)',(new_id,name,redact_text(bot['title'],keys),redact_text(bot['personality'],keys),bot['color'],bot['shape'],bot['profile'],now))
         character=c.execute('SELECT character_id FROM bot_characters WHERE bot_id=?',(bot_id,)).fetchone()
         if character:
             c.execute('INSERT INTO bot_characters VALUES (?,?,?)',(new_id,character['character_id'],now))
+        for routine in routines:
+            next_at=next_occurrence(routine['cron'],routine['timezone'],now)
+            c.execute('INSERT INTO routines VALUES (?,?,?,?,?,?,?,?,?,?)',(str(uuid.uuid4()),routine['title'],routine['instructions'],new_id,routine['cron'],routine['timezone'],1,next_at,now,now))
         limit=c.execute('SELECT daily_nanos,monthly_nanos FROM budget_limits WHERE scope=?',('bot:'+bot_id,)).fetchone()
         if limit:
             c.execute('INSERT INTO budget_limits VALUES (?,?,?)',('bot:'+new_id,limit['daily_nanos'],limit['monthly_nanos']))
@@ -583,7 +593,7 @@ def mark_interrupted_runs():
         c.execute("UPDATE lab_experiments SET status='failed',error='Backend restarted before the experiment finished.',updated_at=? WHERE status IN ('queued','running')",(time.time(),))
         c.execute("UPDATE lab_runs SET status='failed',error='Backend restarted before the experiment finished.',updated_at=? WHERE status IN ('queued','running')",(time.time(),))
         # Queued work is not silently replayed after an unexpected restart.
-        c.execute("UPDATE missions SET status='failed',error=?,updated_at=? WHERE status IN ('queued','running','waiting_approval')",('Backend restarted before the mission finished.',time.time()))
+        c.execute("UPDATE missions SET status='failed',error=?,updated_at=? WHERE status IN ('running','waiting_approval') OR (status='queued' AND id NOT IN (SELECT mission_id FROM routine_runs))",('Backend restarted before the mission finished.',time.time()))
         c.execute("UPDATE mission_runs SET status='failed',error=?,updated_at=? WHERE status IN ('queued','running','waiting_approval')",('Backend restarted before the mission finished.',time.time()))
 
 def event(job, kind, **values):
@@ -1063,6 +1073,168 @@ def schedule_mission(mission_id, group=False):
         mission_tasks.pop(mission_id,None)
         if not finished.cancelled(): finished.exception()
     task.add_done_callback(cleanup)
+
+
+class RoutineIn(BaseModel):
+    title: str = Field(min_length=1,max_length=160)
+    instructions: str = Field(min_length=1,max_length=18000)
+    bot_id: str = Field(min_length=1,max_length=128)
+    cron: str = Field(min_length=1,max_length=120)
+    timezone: str = Field(min_length=1,max_length=100)
+
+
+class RoutinePauseIn(BaseModel):
+    paused: bool = Field(strict=True)
+
+
+def validate_routine(body, now):
+    keys=configured_secrets();title=redact_text(body.title.strip(),keys);instructions=redact_text(body.instructions.strip(),keys)
+    if not title or not instructions: raise HTTPException(400,'Enter a title and instructions.')
+    try: next_at=next_occurrence(body.cron.strip(),body.timezone.strip(),now)
+    except (ValueError,OverflowError) as exc: raise HTTPException(400,str(exc)) from exc
+    return title,instructions,next_at
+
+
+def routine_mission(c, row, scheduled_at, now):
+    mission_id=str(uuid.uuid4())
+    c.execute('INSERT INTO missions VALUES (?,?,?,?,?,?,?,?,?)',(mission_id,row['title'],row['instructions'],None,'queued',None,None,now,now))
+    c.execute('INSERT INTO mission_assignees VALUES (?,?,?)',(mission_id,0,row['bot_id']))
+    c.execute('INSERT INTO routine_runs VALUES (?,?,?,?,?,?)',(str(uuid.uuid4()),row['id'],mission_id,scheduled_at,now,'pending'))
+    return mission_id
+
+
+async def routine_tick(now=None):
+    now=time.time() if now is None else now
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        paused=c.execute("SELECT value FROM config WHERE key='global_pause'").fetchone()
+        if paused and paused['value']=='1': return
+        # Bound catch-up pressure. Advance each slot atomically with its mission;
+        # a uniqueness constraint and SQLite write lock prevent duplicate slots.
+        outstanding=c.execute("SELECT count(*) FROM routine_runs JOIN missions ON missions.id=routine_runs.mission_id WHERE missions.status IN ('queued','running','waiting_approval')").fetchone()[0]
+        for row in c.execute('SELECT * FROM routines WHERE paused=0 AND next_at<=? ORDER BY next_at,id LIMIT 20',(now,)).fetchall():
+            if outstanding>=20: break
+            if not row['bot_id']:
+                c.execute('UPDATE routines SET paused=1,updated_at=? WHERE id=?',(now,row['id']));continue
+            try: next_at=next_occurrence(row['cron'],row['timezone'],row['next_at'])
+            except (ValueError,OverflowError):
+                c.execute('UPDATE routines SET paused=1,updated_at=? WHERE id=?',(now,row['id']));continue
+            routine_mission(c,row,row['next_at'],now);outstanding+=1
+            c.execute('UPDATE routines SET next_at=?,updated_at=? WHERE id=?',(next_at,now,row['id']))
+        queued=[r['mission_id'] for r in c.execute("SELECT routine_runs.mission_id FROM routine_runs JOIN missions ON missions.id=routine_runs.mission_id WHERE missions.status='queued' AND routine_runs.approval='approved' ORDER BY routine_runs.created_at LIMIT 20")]
+    for mission_id in queued:
+        if mission_id not in mission_tasks: schedule_mission(mission_id)
+
+
+async def routine_scheduler():
+    while True:
+        try: await routine_tick()
+        except asyncio.CancelledError: raise
+        except Exception: logging.getLogger('uvicorn.error').exception('Routine scheduler tick failed')
+        await asyncio.sleep(5)
+
+
+@app.get('/api/routines')
+def list_routines(request: Request):
+    require_auth(request);keys=configured_secrets()
+    with db() as c: rows=c.execute('SELECT * FROM routines ORDER BY created_at DESC,id').fetchall()
+    return [redact_event_value(dict(row),keys) for row in rows]
+
+
+@app.post('/api/routines')
+def create_routine(body: RoutineIn, request: Request):
+    require_auth(request);now=time.time();title,instructions,next_at=validate_routine(body,now);rid=str(uuid.uuid4())
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        if c.execute('SELECT count(*) FROM routines').fetchone()[0]>=50: raise HTTPException(400,'At most 50 routines are allowed.')
+        if not c.execute('SELECT 1 FROM bots WHERE id=?',(body.bot_id,)).fetchone(): raise HTTPException(404,'Bot not found.')
+        c.execute('INSERT INTO routines VALUES (?,?,?,?,?,?,?,?,?,?)',(rid,title,instructions,body.bot_id,body.cron.strip(),body.timezone.strip(),0,next_at,now,now))
+    return {'id':rid}
+
+
+@app.put('/api/routines/{routine_id}')
+def update_routine(routine_id: str,body: RoutineIn,request: Request):
+    require_auth(request);now=time.time();title,instructions,next_at=validate_routine(body,now)
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        if not c.execute('SELECT 1 FROM routines WHERE id=?',(routine_id,)).fetchone(): raise HTTPException(404,'Routine not found.')
+        if not c.execute('SELECT 1 FROM bots WHERE id=?',(body.bot_id,)).fetchone(): raise HTTPException(404,'Bot not found.')
+        c.execute('UPDATE routines SET title=?,instructions=?,bot_id=?,cron=?,timezone=?,next_at=?,updated_at=? WHERE id=?',(title,instructions,body.bot_id,body.cron.strip(),body.timezone.strip(),next_at,now,routine_id))
+    return {'id':routine_id}
+
+
+@app.put('/api/routines/{routine_id}/pause')
+def pause_routine(routine_id: str,body: RoutinePauseIn,request: Request):
+    require_auth(request)
+    with db() as c:
+        result=c.execute('UPDATE routines SET paused=?,updated_at=? WHERE id=?',(int(body.paused),time.time(),routine_id))
+        if not result.rowcount: raise HTTPException(404,'Routine not found.')
+    return {'paused':body.paused}
+
+
+@app.post('/api/routines/{routine_id}/run')
+async def run_routine_now(routine_id: str,request: Request):
+    require_auth(request);now=time.time()
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE');require_unpaused(c)
+        row=c.execute('SELECT * FROM routines WHERE id=?',(routine_id,)).fetchone()
+        if not row: raise HTTPException(404,'Routine not found.')
+        if not row['bot_id']: raise HTTPException(400,'The assigned Bot no longer exists.')
+        mission_id=routine_mission(c,row,None,now)
+    return {'mission_id':mission_id}
+
+
+@app.get('/api/routines/{routine_id}/runs')
+def routine_history(routine_id: str,request: Request):
+    require_auth(request);keys=configured_secrets()
+    with db() as c:
+        if not c.execute('SELECT 1 FROM routines WHERE id=?',(routine_id,)).fetchone(): raise HTTPException(404,'Routine not found.')
+        rows=c.execute('SELECT routine_runs.*,missions.status,missions.error FROM routine_runs JOIN missions ON missions.id=routine_runs.mission_id WHERE routine_id=? ORDER BY routine_runs.created_at DESC LIMIT 100',(routine_id,)).fetchall()
+    return [redact_event_value(dict(row),keys) for row in rows]
+
+
+class RoutineDecisionIn(BaseModel):
+    decision: Literal['approve','deny']
+
+
+@app.get('/api/routine-approvals')
+def routine_approvals(request: Request):
+    require_auth(request);keys=configured_secrets()
+    with db() as c:
+        rows=c.execute("""SELECT routine_runs.id,routine_runs.routine_id,routine_runs.mission_id,routine_runs.scheduled_at,
+            routine_runs.created_at,missions.title,missions.instructions,mission_assignees.bot_id
+            FROM routine_runs JOIN missions ON missions.id=routine_runs.mission_id
+            JOIN mission_assignees ON mission_assignees.mission_id=missions.id AND mission_assignees.position=0
+            WHERE routine_runs.approval='pending' AND missions.status='queued'
+            ORDER BY routine_runs.created_at LIMIT 100""").fetchall()
+    return [redact_event_value(dict(row),keys) for row in rows]
+
+
+@app.post('/api/routines/{routine_id}/runs/{routine_run_id}/decision')
+async def decide_routine(routine_id: str,routine_run_id: str,body: RoutineDecisionIn,request: Request):
+    require_auth(request)
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        row=c.execute("""SELECT routine_runs.mission_id,routine_runs.approval,missions.status FROM routine_runs
+            JOIN missions ON missions.id=routine_runs.mission_id WHERE routine_runs.id=? AND routine_runs.routine_id=?""",(routine_run_id,routine_id)).fetchone()
+        if not row: raise HTTPException(404,'Routine run not found.')
+        if row['approval']!='pending' or row['status']!='queued': raise HTTPException(409,'Routine run is no longer awaiting approval.')
+        if body.decision=='approve': require_unpaused(c)
+        approval='approved' if body.decision=='approve' else 'denied'
+        c.execute('UPDATE routine_runs SET approval=? WHERE id=?',(approval,routine_run_id))
+        if approval=='denied': c.execute("UPDATE missions SET status='cancelled',error='Routine run denied by owner.',updated_at=? WHERE id=? AND status='queued'",(time.time(),row['mission_id']))
+        mission_id=row['mission_id']
+    if approval=='approved': schedule_mission(mission_id)
+    return {'approval':approval,'mission_id':mission_id}
+
+
+@app.delete('/api/routines/{routine_id}')
+def delete_routine(routine_id: str,request: Request):
+    require_auth(request)
+    with db() as c:
+        result=c.execute('DELETE FROM routines WHERE id=?',(routine_id,))
+        if not result.rowcount: raise HTTPException(404,'Routine not found.')
+    return {'deleted':True}
 
 
 class HandoffIn(BaseModel):

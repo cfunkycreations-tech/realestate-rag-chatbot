@@ -11,3 +11,5 @@ Pillow==13.0.0
 python-multipart==0.0.33
 
 h11==0.16.0
+
+tzdata==2025.2
