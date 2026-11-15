@@ -98,3 +98,5 @@
 .banner-preview-title small{font-size:clamp(6px,1.6vw,9px)}
 .budget-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 12px}.budget-identity{display:flex;align-items:center;gap:10px}.budget-identity>span:last-child{display:flex;flex-direction:column;gap:3px}.budget-identity small{color:var(--command-muted)}.budget-bot{padding:14px 0;border-top:1px solid var(--command-divider)}.budget-settings h3{margin:0 0 12px}.budget-settings button{margin-top:12px}.budget-settings .profile-card{margin-top:14px}
 @media(max-width:500px){.budget-fields{grid-template-columns:1fr}}
+.delete-bot{display:inline-flex;align-items:center;justify-content:center;gap:6px;border-color:#ad5d69;color:#ffd1d5}.delete-bot:hover:not(:disabled){background:#54242f;border-color:#ff9ba7;color:#fff}.delete-bot:disabled{opacity:.5;cursor:not-allowed}.spotlight-chat .header-delete{display:none}
+@media(max-width:700px){.header-delete{font-size:10px;padding:7px}.header-right{gap:5px}.chat-header{padding:0 12px}}

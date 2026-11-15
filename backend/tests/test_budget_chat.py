@@ -116,3 +116,23 @@ def test_fallback_after_unknown_failure_remains_unreconciled(monkeypatch):
         assert c.get('/api/budget').json()['unknown_usage']==[]
         assert c.get('/api/settings').json()['usage']['unknown']==0
         assert c.get('/api/settings').json()['usage']['cost']==0.0003
+
+
+def test_deleting_bot_preserves_budget_usage_and_saved_key(monkeypatch):
+    from test_vault import archive, png
+    FakeClient.responses=[answer()]
+    monkeypatch.setattr(service.httpx,'AsyncClient',FakeClient)
+    with TestClient(service.app) as c:
+        setup(c);configure_budget(c)
+        c.put('/api/settings/gateways/openrouter',json={'url':'https://gateway.test/v1','key':'disposable-secret'})
+        assert c.post('/api/vault/import',files={'file':('vault.zip',archive([('sprite.png',png('Sprite'))]),'application/zip')}).json()['added']==1
+        bot=c.post('/api/bots',json={'name':'Bot'}).json()['id']
+        run=c.post(f'/api/bots/{bot}/chat',json={'content':'Hi'}).json()['job_id']
+        c.get(f'/api/jobs/{run}/events')
+        assert c.delete(f'/api/bots/{bot}').status_code==200
+        assert c.get('/api/vault/status').json()=={'total':1,'available':1}
+        assert c.get('/api/settings').json()['gateways']['openrouter']['has_key']
+        with service.db() as db:
+            assert db.execute('SELECT bot_id FROM usage').fetchone()['bot_id'] is None
+            row=db.execute('SELECT bot_id,status,actual_nanos FROM budget_reservations').fetchone()
+            assert row['bot_id']==bot and row['status']=='settled' and row['actual_nanos']==300_000

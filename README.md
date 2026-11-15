@@ -52,7 +52,7 @@ Character images are stored in the same private data volume as the database; bac
 
 **Gallery** is the home view. It shows assigned characters only; unassigned Vault art stays hidden. Search Bots, switch grid/list/cluster layout, or use the tag-based collection groups in the sidebar. At import, an optional collection tag is added to each newly imported character; duplicates are not modified. An untagged Bot appears in Uncategorized. The gallery paginates 60 Bots at a time and virtualizes visible rows; the sidebar limits its displayed Bot lists to 50, so use search to narrow them. Bot metadata is still fetched in one request, not server-paginated.
 
-Select a Bot to open its spotlight and chat. Quick Mission sends to the selected Bot through the same chat path. The Activity panel and status indicators come from recorded events. Runs today means `run.started` events since local midnight, not a count of historic runs that predate the event log. Last activity is the latest surviving event. No uptime or mission count is calculated. Upload or remove a private banner under **Settings → Appearance**; otherwise a gradient is shown. The recommended banner size is 2400 × 600. Drag the preview or use the sliders to choose a focal point and zoom, then select **Save placement**. The hero contracts while scrolling and expands again when the content returns to the top.
+Select a Bot to open its spotlight and chat. To remove it, select **Delete Bot** and confirm; its conversation and recorded activity are permanently deleted, while its assigned sprite stays in the Vault. A Bot with a run in progress cannot be deleted until the run ends. Quick Mission sends to the selected Bot through the same chat path. The Activity panel and status indicators come from recorded events. Runs today means `run.started` events since local midnight, not a count of historic runs that predate the event log. Last activity is the latest surviving event. No uptime or mission count is calculated. Upload or remove a private banner under **Settings → Appearance**; otherwise a gradient is shown. The recommended banner size is 2400 × 600. Drag the preview or use the sliders to choose a focal point and zoom, then select **Save placement**. The hero contracts while scrolling and expands again when the content returns to the top.
 
 **Office** renders assigned sprites at desks, falling back to built-in shapes, with real recorded activity. It makes no model calls and displays 50 Bots per page. The earlier scripted demo is not exposed in this view because the Command Center is restricted to real Bots and recorded activity. Group chats and real meeting events are not implemented. The live feed starts with events recorded after the event-log upgrade. On a phone, swipe the canvas horizontally to explore; use the Bot buttons below it for a keyboard-accessible way to open a chat.
 
@@ -117,6 +117,19 @@ npx playwright install chromium
 $env:E2E_URL = "http://localhost:3000"
 $env:E2E_SETUP_TOKEN = "your-disposable-setup-code"
 npm run test:budget
+```
+
+### Delete Bot browser check
+
+This check creates and deletes Bots; run it **only against a fresh disposable installation**:
+
+```powershell
+Set-Location frontend
+npm ci
+npx playwright install chromium
+$env:E2E_URL = "http://localhost:3000"
+$env:E2E_SETUP_TOKEN = "your-disposable-setup-code"
+npm run test:delete
 ```
 
 ## Current behavior and limitations
