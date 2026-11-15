@@ -115,6 +115,7 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(title='Funk Bot', lifespan=lifespan)
 jobs = {}
+mission_tasks = {}
 
 class Password(BaseModel):
     password: str = Field(min_length=8, max_length=256)
@@ -274,6 +275,8 @@ def delete_bot(bot_id: str, request: Request):
     with db() as c:
         c.execute('BEGIN IMMEDIATE')
         if c.execute("SELECT 1 FROM runs WHERE bot_id=? AND status IN ('queued','running','waiting_approval')", (bot_id,)).fetchone(): raise HTTPException(409, 'Wait for the current response before deleting this Bot.')
+        if c.execute("SELECT 1 FROM missions JOIN mission_assignees ON mission_assignees.mission_id=missions.id WHERE mission_assignees.bot_id=? AND missions.status IN ('queued','running','waiting_approval')",(bot_id,)).fetchone():
+            raise HTTPException(409,'Cancel the active or queued mission before deleting this Bot.')
         assignment=c.execute('SELECT character_id FROM bot_characters WHERE bot_id=?',(bot_id,)).fetchone()
         # Tool audit has no foreign keys in the additive legacy schema. Delete
         # it explicitly, matching the confirmation that recorded activity goes.
@@ -505,6 +508,11 @@ def mark_interrupted_runs():
                 abort_tool(c,call['id'],'Backend restarted; tool outcome may be unknown.',lambda text:text)
             c.execute("UPDATE runs SET status='failed', updated_at=? WHERE id=?", (time.time(), row['id']))
             append_event(c, row['bot_id'], row['id'], 'run.finished', {'status':'failed'})
+            c.execute("UPDATE mission_runs SET status='failed',error=?,updated_at=? WHERE run_id=? AND status IN ('queued','running','waiting_approval')",('Backend restarted before the mission finished.',time.time(),row['id']))
+            c.execute("UPDATE missions SET status='failed',error=?,updated_at=? WHERE id IN (SELECT mission_id FROM mission_runs WHERE run_id=?) AND status IN ('queued','running','waiting_approval')",('Backend restarted before the mission finished.',time.time(),row['id']))
+        # Queued work is not silently replayed after an unexpected restart.
+        c.execute("UPDATE missions SET status='failed',error=?,updated_at=? WHERE status IN ('queued','running','waiting_approval')",('Backend restarted before the mission finished.',time.time()))
+        c.execute("UPDATE mission_runs SET status='failed',error=?,updated_at=? WHERE status IN ('queued','running','waiting_approval')",('Backend restarted before the mission finished.',time.time()))
 
 def event(job, kind, **values):
     payload = {'type':kind, **values}
@@ -559,6 +567,11 @@ def finish_run(job, status, kind, values=None, completion=None):
         record_event(c, job['id'], 'bot.state_changed', {'state':'done' if status == 'done' else 'error' if status == 'failed' else 'idle'})
         record_event(c, job['id'], kind, values)
         c.execute('UPDATE runs SET status=?,updated_at=? WHERE id=?', (status, time.time(), job['id']))
+        if job.get('mission_id'):
+            result=completion[1] if completion else None
+            reason=values.get('message') if status!='done' else None
+            c.execute('UPDATE mission_runs SET status=?,result=?,error=?,updated_at=? WHERE run_id=?',(status,result,reason,time.time(),job['id']))
+            c.execute('UPDATE missions SET status=?,result=?,error=?,updated_at=? WHERE id=?',(status,result,reason,time.time(),job['mission_id']))
         append_event(c, job['bot_id'], job['id'], 'run.finished', {'status':status})
     job['done'] = True
     job['notify'].set()
@@ -584,6 +597,10 @@ def tool_event(job, item):
             c.execute("UPDATE runs SET status='waiting_approval',updated_at=? WHERE id=? AND status='running'",(time.time(),job['id']))
         elif kind=='tool.decision':
             c.execute("UPDATE runs SET status='running',updated_at=? WHERE id=? AND status='waiting_approval'",(time.time(),job['id']))
+        if job.get('mission_id') and (requires_decision or kind=='tool.decision'):
+            status='waiting_approval' if requires_decision else 'running'
+            c.execute('UPDATE mission_runs SET status=?,updated_at=? WHERE run_id=?',(status,time.time(),job['id']))
+            c.execute('UPDATE missions SET status=?,updated_at=? WHERE id=?',(status,time.time(),job['mission_id']))
         record_event(c,job['id'],kind,values)
     job['notify'].set()
 
@@ -599,6 +616,7 @@ async def run_chat(job, bot, history, profile):
             if 'id' in job and prompt_bound(messages,tool_definitions)>job['max_prompt_tokens']:
                 raise BudgetError('Conversation and tool results exceed the configured prompt token safety bound.')
             result=None
+            failure_message='Could not get a response from the configured models. Check gateway settings and try again.'
             for entry in entries:
                 emitted=False;got_calls=False
                 try:
@@ -645,9 +663,12 @@ async def run_chat(job, bot, history, profile):
                 except (httpx.HTTPError,ValueError,KeyError,TypeError) as exc:
                     if job.get('dispatched'): job['uncertain']=True
                     status=exc.response.status_code if isinstance(exc,httpx.HTTPStatusError) else None
+                    if status is not None: failure_message=f'Gateway returned HTTP {status}. Check gateway settings or try again.'
+                    elif isinstance(exc,httpx.HTTPError): failure_message='Could not connect to or read from the configured gateway.'
+                    else: failure_message='The gateway returned an invalid or incomplete response.'
                     if emitted or got_calls or (status is not None and status not in (429,500,502,503,504)): break
             if not result:
-                finish_run(job,'failed','error',{'message':'Could not get a response from the configured models. Check gateway settings and try again.'});return
+                finish_run(job,'failed','error',{'message':failure_message});return
             content,calls,usage,entry=result
             complete_text+=content
             if not calls:
@@ -690,9 +711,7 @@ async def run_chat(job, bot, history, profile):
     except BudgetError as exc:
         finish_run(job,'failed','error',{'message':str(exc)})
 
-@app.post('/api/bots/{bot_id}/chat')
-async def chat(bot_id: str, body: ChatIn, request: Request):
-    require_auth(request)
+async def start_chat(bot_id: str, body: ChatIn, mission_id: str | None = None):
     # Compute redaction before acquiring the write lock: redact reads config.
     keys = configured_secrets()
     content = redact_text(body.content, keys)
@@ -701,6 +720,8 @@ async def chat(bot_id: str, body: ChatIn, request: Request):
         c.execute('BEGIN IMMEDIATE')
         row=c.execute('SELECT * FROM bots WHERE id=?',(bot_id,)).fetchone()
         if not row: raise HTTPException(404,'Bot not found.')
+        if mission_id and not c.execute("SELECT 1 FROM missions JOIN mission_assignees ON mission_assignees.mission_id=missions.id WHERE missions.id=? AND missions.status='queued' AND mission_assignees.bot_id=?",(mission_id,bot_id)).fetchone():
+            raise HTTPException(409,'This mission is no longer queued for this Bot.')
         if c.execute("SELECT 1 FROM runs WHERE bot_id=? AND status IN ('queued','running','waiting_approval')", (bot_id,)).fetchone():
             raise HTTPException(409,'This Bot is already responding.')
         bot=dict(row)
@@ -722,12 +743,15 @@ async def chat(bot_id: str, body: ChatIn, request: Request):
             reserve(c, job_id, bot_id, chosen_profile, now, attempts=len(entries))
         except BudgetError as exc: raise HTTPException(402, str(exc)) from exc
         c.execute('INSERT INTO runs VALUES (?,?,?,?,?)', (job_id,bot_id,'running',now,now))
+        if mission_id:
+            c.execute('INSERT INTO mission_runs VALUES (?,?,?,?,?,?,?,?,?,?)',(str(uuid.uuid4()),mission_id,bot_id,job_id,'member','running',None,None,now,now))
+            c.execute("UPDATE missions SET status='running',updated_at=? WHERE id=?",(now,mission_id))
         append_event(c, bot_id, job_id, 'run.started', {'status':'running'})
         record_event(c, job_id, 'bot.state_changed', {'state':'working'})
         message_id = str(uuid.uuid4())
         c.execute('INSERT INTO messages VALUES (?,?,?,?,?)',(message_id,bot_id,'user',content,now))
         append_event(c, bot_id, job_id, 'message.sent', {'message_id':message_id, 'role':'user', 'summary':content[:240]})
-    job={'id':job_id,'bot_id':bot_id,'done':False,'created':time.time(),'notify':asyncio.Event(),'entries':entries,'max_completion_tokens':price['max_completion_tokens'],'max_prompt_tokens':price['max_prompt_tokens'],'secrets':set(keys)}; jobs[job_id]=job
+    job={'id':job_id,'bot_id':bot_id,'done':False,'created':time.time(),'notify':asyncio.Event(),'entries':entries,'max_completion_tokens':price['max_completion_tokens'],'max_prompt_tokens':price['max_prompt_tokens'],'secrets':set(keys),'mission_id':mission_id}; jobs[job_id]=job
     policy=WebPolicy.model_validate_json(config('web_policy','{}'))
     context=ToolContext(db,DATA,job_id,bot_id,lambda text:redact_text(text,list(job['secrets'])),policy.allow,policy.deny,lambda _:None)
     job['tool_bridge']=ToolBridge(context,lambda item:tool_event(job,item))
@@ -742,6 +766,120 @@ async def chat(bot_id: str, body: ChatIn, request: Request):
     for k in list(jobs):
         if jobs[k]['done'] and jobs[k]['created'] < time.time()-3600: del jobs[k]
     return {'job_id':job_id}
+
+
+@app.post('/api/bots/{bot_id}/chat')
+async def chat(bot_id: str, body: ChatIn, request: Request):
+    require_auth(request)
+    return await start_chat(bot_id,body)
+
+
+class MissionIn(BaseModel):
+    title: str = Field(min_length=1,max_length=160)
+    instructions: str = Field(min_length=1,max_length=18000)
+    bot_id: str = Field(min_length=1,max_length=128)
+
+
+def mission_out(c, row, include_log=False):
+    mission=dict(row)
+    mission['assignees']=[dict(item) for item in c.execute('SELECT position,bot_id FROM mission_assignees WHERE mission_id=? ORDER BY position',(row['id'],)).fetchall()]
+    runs=[]
+    for item in c.execute('SELECT * FROM mission_runs WHERE mission_id=? ORDER BY created_at,id',(row['id'],)).fetchall():
+        run=dict(item)
+        reservations=c.execute('SELECT status,actual_nanos FROM budget_reservations WHERE parent_run_id=? OR (parent_run_id IS NULL AND run_id=?)',(run['run_id'],run['run_id'])).fetchall() if run['run_id'] else []
+        run['cost_usd']=None if any(r['status'] in ('reserved','uncertain') for r in reservations) else sum(r['actual_nanos'] or 0 for r in reservations)/NANOS_PER_DOLLAR
+        if include_log:
+            entries=c.execute('SELECT id,event_type,payload,created_at FROM run_events WHERE run_id=? ORDER BY id DESC LIMIT 200',(run['run_id'],)).fetchall()
+            run['log']=[{'id':e['id'],'type':e['event_type'],'payload':json.loads(e['payload']),'created_at':e['created_at']} for e in reversed(entries)]
+        runs.append(run)
+    mission['runs']=runs
+    mission['cost_usd']=None if any(run['cost_usd'] is None for run in runs) else sum(run['cost_usd'] for run in runs)
+    return mission
+
+
+async def run_mission(mission_id):
+    try:
+        while True:
+            with db() as c:
+                row=c.execute("SELECT missions.*,mission_assignees.bot_id FROM missions JOIN mission_assignees ON mission_assignees.mission_id=missions.id AND mission_assignees.position=0 WHERE missions.id=?",(mission_id,)).fetchone()
+            if not row or row['status']!='queued': return
+            try:
+                if not row['bot_id']: raise HTTPException(404,'The assigned Bot no longer exists.')
+                content='Mission: '+row['title']+'\n\n'+row['instructions']
+                await start_chat(row['bot_id'],ChatIn(content=content),mission_id)
+                return
+            except HTTPException as exc:
+                if exc.status_code==409 and exc.detail=='This Bot is already responding.':
+                    await asyncio.sleep(1)
+                    continue
+                with db() as c:
+                    c.execute("UPDATE missions SET status='failed',error=?,updated_at=? WHERE id=? AND status='queued'",(str(exc.detail),time.time(),mission_id))
+                return
+    except asyncio.CancelledError:
+        # Cancelling an already-cancelled queued mission must not change it to failed.
+        with db() as c:
+            c.execute("UPDATE missions SET status='failed',error=?,updated_at=? WHERE id=? AND status='queued'",('The backend stopped before this mission started.',time.time(),mission_id))
+        raise
+    except Exception:
+        with db() as c:
+            c.execute("UPDATE missions SET status='failed',error=?,updated_at=? WHERE id=? AND status='queued'",('The mission could not start unexpectedly.',time.time(),mission_id))
+
+
+@app.post('/api/missions')
+async def create_mission(body: MissionIn, request: Request):
+    require_auth(request)
+    keys=configured_secrets();title=redact_text(body.title.strip(),keys);instructions=redact_text(body.instructions.strip(),keys)
+    if not title or not instructions: raise HTTPException(400,'Enter a title and instructions.')
+    mission_id=str(uuid.uuid4());now=time.time()
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        if not c.execute('SELECT 1 FROM bots WHERE id=?',(body.bot_id,)).fetchone(): raise HTTPException(404,'Bot not found.')
+        c.execute('INSERT INTO missions VALUES (?,?,?,?,?,?,?,?,?)',(mission_id,title,instructions,None,'queued',None,None,now,now))
+        c.execute('INSERT INTO mission_assignees VALUES (?,?,?)',(mission_id,0,body.bot_id))
+    task=asyncio.create_task(run_mission(mission_id));mission_tasks[mission_id]=task
+    def cleanup(finished):
+        mission_tasks.pop(mission_id,None)
+        if not finished.cancelled(): finished.exception()
+    task.add_done_callback(cleanup)
+    return {'id':mission_id}
+
+
+@app.get('/api/missions')
+def list_missions(request: Request):
+    require_auth(request)
+    with db() as c:
+        rows=c.execute('SELECT * FROM missions ORDER BY created_at DESC,id DESC LIMIT 100').fetchall()
+        return [mission_out(c,row) for row in rows]
+
+
+@app.get('/api/missions/{mission_id}')
+def get_mission(mission_id: str, request: Request):
+    require_auth(request)
+    with db() as c:
+        row=c.execute('SELECT * FROM missions WHERE id=?',(mission_id,)).fetchone()
+        if not row: raise HTTPException(404,'Mission not found.')
+        return mission_out(c,row,include_log=True)
+
+
+@app.post('/api/missions/{mission_id}/cancel')
+async def cancel_mission(mission_id: str, request: Request):
+    require_auth(request)
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        row=c.execute('SELECT status FROM missions WHERE id=?',(mission_id,)).fetchone()
+        if not row: raise HTTPException(404,'Mission not found.')
+        if row['status']=='queued':
+            c.execute("UPDATE missions SET status='cancelled',error='Mission cancelled before starting.',updated_at=? WHERE id=? AND status='queued'",(time.time(),mission_id))
+            task=mission_tasks.get(mission_id)
+            if task: task.cancel()
+            return {'ok':True}
+        if row['status'] not in ('running','waiting_approval'): raise HTTPException(409,'This mission is no longer active.')
+        run=c.execute("SELECT run_id FROM mission_runs WHERE mission_id=? AND status IN ('running','waiting_approval') ORDER BY created_at DESC LIMIT 1",(mission_id,)).fetchone()
+    job=jobs.get(run['run_id']) if run else None
+    if not job or job['done']: raise HTTPException(409,'This mission cannot be cancelled on this worker.')
+    job['user_cancelled']=True;job['task'].cancel()
+    return {'ok':True}
+
 
 @app.get('/api/bots/{bot_id}/latest-run')
 def latest_run(bot_id: str, request: Request):
