@@ -29,6 +29,10 @@ class ToolContext:
     handoff_call: Callable = None
     mission_id: str | None = None
     artifact_call: Callable = None
+    artifact_review: Callable = None
+    gateway_entries: list = field(default_factory=list)
+    destination_snapshot: Callable = None
+    approved_destinations: list | None = None
 
 
 def live(c, context):
@@ -59,6 +63,19 @@ async def execute(context: ToolContext, name: str, args: dict, wait_decision):
             connector=context.connector_info(c,parsed.connector_id)
             args={**parsed.model_dump(),'arguments_json':json.dumps(arguments,ensure_ascii=False),'endpoint':connector['url'] if connector else '', 'connector_revision':connector['revision'] if connector else ''}
             if not connector or not connector.get('enabled') or parsed.tool_name not in connector.get('allowed_tools',[]): policy='deny'
+        if name=='read_work_file':
+            parsed=tools.ReadWorkFileArgs.model_validate(args)
+            try:
+                if not context.mission_id or not context.artifact_review: raise tools.ToolError('Mission file access is unavailable.')
+                review=context.artifact_review(c,context,parsed)
+                review=tool_audit._redact_result(review,context.redact)
+                reviewed=context.redact(json.dumps(review,ensure_ascii=False))
+                if len(reviewed)>32000: raise tools.ToolError('File review is too large.')
+                try: json.loads(reviewed)
+                except (ValueError,RecursionError): raise tools.ToolError('File review could not be safely encoded.') from None
+                args={**parsed.model_dump(),'review_json':reviewed}
+            except tools.ToolError:
+                args={**parsed.model_dump(),'review_json':''};policy='deny'
         if name=='attach_mission_result':
             parsed=tools.MissionArtifactArgs.model_validate(args)
             args={**parsed.model_dump(),'name':parsed.name.strip()}
@@ -77,7 +94,7 @@ async def execute(context: ToolContext, name: str, args: dict, wait_decision):
             context.notify({'type':'tool.decision','call_id':call,'decision':'policy_denied','status':'denied'})
             return {'status':'denied','message':'The owner tool policy denied this call.'}
         if row['status']=='pending':
-            granted=name not in ('mcp_call','create_handoff','attach_mission_result') and name in context.run_grants
+            granted=name not in ('mcp_call','create_handoff','attach_mission_result','read_work_file') and name in context.run_grants
             decision='run_grant' if granted else await wait_decision(call)
             with context.db() as c:
                 c.execute('BEGIN IMMEDIATE');live(c,context)
@@ -87,7 +104,7 @@ async def execute(context: ToolContext, name: str, args: dict, wait_decision):
                     tool_audit.approve_from_run_grant(c,call);status='approved'
                 else:
                     status=tool_audit.decide(c,call,decision)
-            if not granted and decision=='approve' and name not in ('mcp_call','create_handoff','attach_mission_result'): context.run_grants.add(name)
+            if not granted and decision=='approve' and name not in ('mcp_call','create_handoff','attach_mission_result','read_work_file'): context.run_grants.add(name)
             context.notify({'type':'tool.decision','call_id':call,'decision':decision,'status':status})
             if status=='denied': return {'status':'denied','message':'The owner denied this tool call.'}
         with context.db() as c:
@@ -97,12 +114,23 @@ async def execute(context: ToolContext, name: str, args: dict, wait_decision):
                 reviewed=json.loads(row['arguments']);latest=context.connector_info(c,reviewed['connector_id'])
                 if not latest or not latest.get('enabled') or reviewed['tool_name'] not in latest.get('allowed_tools',[]) or latest.get('revision')!=reviewed['connector_revision'] or latest.get('url')!=reviewed['endpoint']: current='deny'
                 connector=latest
+            if name=='read_work_file':
+                reviewed=tools.ReadWorkFileArgs.model_validate_json(row['arguments'])
+                try:
+                    latest=context.artifact_review(c,context,reviewed)
+                    latest=tool_audit._redact_result(latest,context.redact)
+                    if context.redact(json.dumps(latest,ensure_ascii=False))!=reviewed.review_json: current='deny'
+                    destinations=context.destination_snapshot(c,context)
+                    if context.approved_destinations is not None and context.approved_destinations!=destinations: current='deny'
+                except tools.ToolError: current='deny'
             if name=='create_handoff':
                 reviewed=json.loads(row['arguments']);receiver=c.execute('SELECT name FROM bots WHERE id=?',(reviewed['to_bot_id'],)).fetchone()
                 if not receiver or context.redact(receiver['name'])!=reviewed['receiver_name'] or context.handoff_catalog.get(reviewed['to_bot_id'])!=reviewed['receiver_name']: current='deny'
             if current=='deny' or (policy=='auto' and current!='auto'):
                 tool_audit.deny_policy_change(c,call);blocked=True
-            else: row=tool_audit.claim(c,call);blocked=False
+            else:
+                row=tool_audit.claim(c,call);blocked=False
+                if name=='read_work_file': context.approved_destinations=destinations
         if blocked:
             context.notify({'type':'tool.decision','call_id':call,'decision':'policy_denied','status':'denied'})
             return {'status':'denied','message':'Tool policy changed before execution.'}
@@ -111,6 +139,8 @@ async def execute(context: ToolContext, name: str, args: dict, wait_decision):
             if name=='mcp_call':
                 if not context.connector_call: raise tools.ToolError('Connector execution is unavailable.')
                 result=await context.connector_call(connector,tools.McpCallArgs.model_validate(safe_args))
+            elif name=='read_work_file':
+                result=json.loads(tools.ReadWorkFileArgs.model_validate(safe_args).review_json)
             elif name=='attach_mission_result':
                 if not context.mission_id or not context.artifact_call: raise tools.ToolError('Mission result attachments are unavailable.')
                 result=await context.artifact_call(context,tools.MissionArtifactArgs.model_validate(safe_args))

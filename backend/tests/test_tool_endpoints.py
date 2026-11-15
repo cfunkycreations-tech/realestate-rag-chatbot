@@ -84,13 +84,16 @@ def test_tool_audit_export_auth_snapshot_scope_redaction_and_csv(tmp_path):
             db.execute('INSERT INTO tool_calls (id,run_id,bot_id,tool_name,risk,arguments,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)',
                        ('=danger',ctx.run_id,ctx.bot_id,'mcp_call','send',json.dumps({'arguments_json':json.dumps({secret:secret})}),'denied',1,1))
             db.execute('INSERT INTO tool_audit (call_id,action,created_at) VALUES (?,?,?)',('=danger','policy_denied',1))
+            db.execute('INSERT INTO tool_calls (id,run_id,bot_id,tool_name,risk,arguments,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)',
+                       ('file',ctx.run_id,ctx.bot_id,'read_work_file','send',json.dumps({'review_json':json.dumps({'content':secret})}),'denied',2,2))
         client.put('/api/settings/gateways/openrouter',json={'url':'https://example.com/v1','key':secret})
         response=client.get('/api/tool-audit/export',params={'bot_id':ctx.bot_id})
         assert response.status_code==200 and response.headers['cache-control']=='no-store'
-        calls=response.json();assert len(calls)==2
+        calls=response.json();assert len(calls)==3
         assert calls[0]['arguments']['content']=='[redacted]' and calls[0]['result']['sensitive']=='[redacted]'
         assert calls[0]['audit'][0]['action']=='proposed'
         assert json.loads(calls[1]['arguments']['arguments_json'])=={'[redacted]':'[redacted]'}
+        assert json.loads(calls[2]['arguments']['review_json'])=={'content':'[redacted]'}
         assert client.get('/api/tool-audit/export?bot_id=other').json()==[]
         csv_response=client.get('/api/tool-audit/export?format=csv')
         rows=list(csv.DictReader(io.StringIO(csv_response.text)))

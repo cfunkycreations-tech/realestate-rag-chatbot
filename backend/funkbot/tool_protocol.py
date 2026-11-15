@@ -12,7 +12,7 @@ MAX_ARGUMENT_BYTES=20_000
 
 
 def declarations(include_mcp=False, include_handoff=False, include_mission_artifacts=False):
-    return [{'type':'function','function':{'name':spec.name,'description':spec.description,'parameters':spec.args.model_json_schema()}} for spec in REGISTRY.values() if (spec.name!='mcp_call' or include_mcp) and (spec.name!='create_handoff' or include_handoff) and (spec.name!='attach_mission_result' or include_mission_artifacts)]
+    return [{'type':'function','function':{'name':spec.name,'description':spec.description,'parameters':spec.args.model_json_schema()}} for spec in REGISTRY.values() if (spec.name!='mcp_call' or include_mcp) and (spec.name!='create_handoff' or include_handoff) and (spec.name not in ('attach_mission_result','read_work_file') or include_mission_artifacts)]
 
 
 class CallAccumulator:
