@@ -4,7 +4,7 @@ import time
 from fastapi.testclient import TestClient
 
 import app as service
-from test_app import FakeClient, FakeStream, setup
+from test_app import FakeClient, FakeStream, setup, configure_budget
 
 
 def test_persisted_run_events_replay_after_restart(monkeypatch):
@@ -16,6 +16,7 @@ def test_persisted_run_events_replay_after_restart(monkeypatch):
     monkeypatch.setattr(service.httpx, 'AsyncClient', FakeClient)
     with TestClient(service.app) as client:
         setup(client)
+        configure_budget(client)
         bot_id = client.post('/api/bots',json={'name':'Scout'}).json()['id']
         job_id = client.post(f'/api/bots/{bot_id}/chat',json={'content':'Hi'}).json()['job_id']
         payload = client.get(f'/api/jobs/{job_id}/events').text

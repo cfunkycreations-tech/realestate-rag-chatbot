@@ -12,6 +12,11 @@ def setup(client):
     assert client.post('/api/auth/setup', json={'password': 'correct horse battery staple', 'setup_token': service.ensure_setup_token(service.DATA)}).status_code == 200
 
 
+def configure_budget(client):
+    response = client.put('/api/budget/prices/smart', json={'prompt':'1','completion':'2','max_prompt_tokens':8192,'max_completion_tokens':512})
+    assert response.status_code == 200
+
+
 def test_auth_and_persistent_bot_deletion():
     with TestClient(service.app) as client:
         assert client.get('/api/bots').status_code == 401
@@ -110,6 +115,7 @@ def test_chat_http_flow_and_restart_persistence(monkeypatch):
     monkeypatch.setattr(service.httpx, 'AsyncClient', FakeClient)
     with TestClient(service.app) as client:
         setup(client)
+        configure_budget(client)
         bot = client.post('/api/bots', json={'name': 'Scout'}).json()['id']
         run = client.post(f'/api/bots/{bot}/chat', json={'content':'Make a plan'}).json()['job_id']
         events = client.get(f'/api/jobs/{run}/events')

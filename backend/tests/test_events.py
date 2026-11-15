@@ -1,7 +1,7 @@
 import json
 from fastapi.testclient import TestClient
 import app as service
-from test_app import FakeClient, FakeStream, setup
+from test_app import FakeClient, FakeStream, setup, configure_budget
 
 
 def test_events_auth_order_cursor_and_redaction(monkeypatch):
@@ -15,6 +15,7 @@ def test_events_auth_order_cursor_and_redaction(monkeypatch):
         assert client.get('/api/events').status_code == 401
         setup(client)
         client.put('/api/settings/gateways/openrouter', json={'url':'https://gateway.test/v1','key':key})
+        configure_budget(client)
         bot=client.post('/api/bots',json={'name':'Scout'}).json()['id']
         run=client.post(f'/api/bots/{bot}/chat',json={'content':'Hello '+key}).json()['job_id']
         assert client.get(f'/api/jobs/{run}/events').status_code == 200
@@ -36,6 +37,7 @@ def test_failed_run_emits_error_event(monkeypatch):
     monkeypatch.setattr(service.httpx, 'AsyncClient', FakeClient)
     with TestClient(service.app) as client:
         setup(client)
+        configure_budget(client)
         bot=client.post('/api/bots',json={'name':'Scout'}).json()['id']
         run=client.post(f'/api/bots/{bot}/chat',json={'content':'Hi'}).json()['job_id']
         client.get(f'/api/jobs/{run}/events')

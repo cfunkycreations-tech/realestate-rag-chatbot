@@ -8,6 +8,7 @@ import os
 import secrets
 import time
 import uuid
+from decimal import Decimal
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlparse
@@ -27,6 +28,7 @@ from funkbot.events import EventPage, append_event, row_to_event
 from funkbot.auth_security import ensure_setup_token, lockout_seconds
 from funkbot.redaction import SlidingRedactor, redact_text
 from funkbot.vault import MAX_ARCHIVE, VaultError, character_for_bot, draw_character, import_zip
+from funkbot.budget import BudgetError, NANOS_PER_DOLLAR, dollars_to_nanos, limit_to_nanos, limits_for, reconcile_run, reconcile_usage, reserve, settle, token_cost_nanos
 
 DATA = Path(os.environ.get('FUNK_DATA_DIR', Path(__file__).parent.parent / 'data'))
 DATA.mkdir(parents=True, exist_ok=True)
@@ -323,6 +325,8 @@ def settings(request: Request):
         g['has_key']=bool(g.pop('key', ''))
     with db() as c:
         usage=dict(c.execute('SELECT COALESCE(SUM(prompt_tokens),0) as prompt_tokens, COALESCE(SUM(completion_tokens),0) as completion_tokens, COALESCE(SUM(cost),0) as cost FROM usage').fetchone())
+        usage['cost'] += c.execute('SELECT COALESCE(SUM(cost_nanos),0) FROM budget_reconciliations WHERE run_id IS NOT NULL').fetchone()[0] / NANOS_PER_DOLLAR
+        usage['unknown'] = c.execute("SELECT COUNT(*) FROM budget_reservations WHERE status='uncertain'").fetchone()[0] + c.execute("SELECT COUNT(*) FROM usage WHERE cost IS NULL AND NOT EXISTS (SELECT 1 FROM budget_reservations WHERE budget_reservations.usage_id=usage.id)").fetchone()[0]
     return {'gateways':gateways, 'profiles':json.loads(config('profiles')), 'usage':usage}
 
 @app.put('/api/settings/gateways/{name}')
@@ -365,6 +369,88 @@ async def models(name: str, request: Request):
         return {'models': [x['id'] for x in result.json().get('data',[]) if isinstance(x,dict) and isinstance(x.get('id'),str)][:1000]}
     except Exception as e: raise HTTPException(502, 'Could not reach gateway. Check its URL and credentials.') from e
 
+PROFILES = {'fast', 'smart', 'thinker', 'vision', 'cheap-bulk'}
+
+
+class BudgetLimitsIn(BaseModel):
+    daily: str = Field(max_length=32)
+    monthly: str | None = Field(default=None, max_length=32)
+
+
+class BudgetPriceIn(BaseModel):
+    prompt: str = Field(max_length=32)
+    completion: str = Field(max_length=32)
+    max_prompt_tokens: int = Field(ge=1, le=1_000_000, strict=True)
+    max_completion_tokens: int = Field(ge=1, le=100_000, strict=True)
+
+
+class BudgetCorrectionIn(BaseModel):
+    amount: str = Field(max_length=32)
+    source: str = Field(min_length=1, max_length=500)
+
+
+def nano_string(value):
+    return str(Decimal(value) / Decimal(NANOS_PER_DOLLAR))
+
+
+@app.get('/api/budget')
+def get_budget(request: Request):
+    require_auth(request)
+    with db() as c:
+        account = limits_for(c, 'account')
+        bots = {row['scope'][4:]: {'daily': nano_string(row['daily_nanos']), 'monthly': None if row['monthly_nanos'] is None else nano_string(row['monthly_nanos'])} for row in c.execute("SELECT * FROM budget_limits WHERE scope LIKE 'bot:%'")}
+        prices = {row['profile']: {'prompt': row['prompt_usd_per_million'], 'completion': row['completion_usd_per_million'], 'max_prompt_tokens': row['max_prompt_tokens'], 'max_completion_tokens': row['max_completion_tokens']} for row in c.execute('SELECT * FROM budget_prices')}
+        uncertain = [dict(row) for row in c.execute("SELECT run_id,bot_id,profile,created_at FROM budget_reservations WHERE status='uncertain' ORDER BY created_at DESC")]
+        unknown = [dict(row) for row in c.execute("SELECT id,bot_id,gateway,model,created_at FROM usage WHERE cost IS NULL AND NOT EXISTS (SELECT 1 FROM budget_reservations WHERE budget_reservations.usage_id=usage.id) ORDER BY created_at DESC")]
+    keys=configured_secrets()
+    for row in unknown:
+        for field in ('gateway','model'):
+            if row[field] is not None: row[field]=redact_text(row[field],keys)
+    return {'account': {'daily': nano_string(account[0]), 'monthly': None if account[1] is None else nano_string(account[1])}, 'bots': bots, 'prices': prices, 'unreconciled': uncertain, 'unknown_usage': unknown}
+
+
+@app.put('/api/budget/limits/{scope}')
+def put_budget_limits(scope: str, body: BudgetLimitsIn, request: Request):
+    require_auth(request)
+    if scope != 'account' and not scope.startswith('bot:'): raise HTTPException(400, 'Invalid budget scope.')
+    try:
+        daily = limit_to_nanos(body.daily)
+        monthly = None if body.monthly is None else limit_to_nanos(body.monthly)
+    except BudgetError as exc: raise HTTPException(400, str(exc)) from exc
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        if scope.startswith('bot:') and not c.execute('SELECT 1 FROM bots WHERE id=?', (scope[4:],)).fetchone(): raise HTTPException(404, 'Bot not found.')
+        c.execute('INSERT OR REPLACE INTO budget_limits VALUES (?,?,?)', (scope,daily,monthly))
+    return {'ok': True}
+
+
+@app.put('/api/budget/prices/{profile}')
+def put_budget_price(profile: str, body: BudgetPriceIn, request: Request):
+    require_auth(request)
+    if profile not in PROFILES: raise HTTPException(404, 'Profile not found.')
+    try:
+        token_cost_nanos(body.max_prompt_tokens,body.max_completion_tokens,body.prompt,body.completion)
+    except BudgetError as exc: raise HTTPException(400,str(exc)) from exc
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        c.execute('INSERT OR REPLACE INTO budget_prices VALUES (?,?,?,?,?)', (profile,body.prompt,body.completion,body.max_prompt_tokens,body.max_completion_tokens))
+    return {'ok': True}
+
+
+@app.post('/api/budget/reconcile/{kind}/{identifier}')
+def reconcile_budget(kind: str, identifier: str, body: BudgetCorrectionIn, request: Request):
+    require_auth(request)
+    source = redact(body.source)
+    try:
+        with db() as c:
+            c.execute('BEGIN IMMEDIATE')
+            if kind == 'run': reconcile_run(c,identifier,body.amount,source)
+            elif kind == 'usage' and identifier.isdigit(): reconcile_usage(c,int(identifier),body.amount,source)
+            else: raise HTTPException(400, 'Invalid correction target.')
+    except BudgetError as exc: raise HTTPException(400, str(exc)) from exc
+    return {'ok': True}
+
+
 class ChatIn(BaseModel):
     content: str = Field(min_length=1,max_length=20000)
     profile: str | None = Field(default=None, pattern='^(fast|smart|thinker|vision|cheap-bulk)$')
@@ -387,6 +473,7 @@ def mark_interrupted_runs():
         for row in rows:
             record_event(c, row['id'], 'bot.state_changed', {'state':'error'})
             record_event(c, row['id'], 'error', {'message':'The backend restarted before this response finished. Please try again.'})
+            c.execute("UPDATE budget_reservations SET status='uncertain' WHERE run_id=? AND status='reserved'", (row['id'],))
             c.execute("UPDATE runs SET status='failed', updated_at=? WHERE id=?", (time.time(), row['id']))
             append_event(c, row['bot_id'], row['id'], 'run.finished', {'status':'failed'})
 
@@ -418,8 +505,25 @@ def finish_run(job, status, kind, values=None, completion=None):
             message_id = str(uuid.uuid4())
             c.execute('INSERT INTO messages VALUES (?,?,?,?,?)', (message_id, bot_id, 'assistant', content, time.time()))
             append_event(c, bot_id, job['id'], 'message.sent', {'message_id':message_id, 'role':'assistant', 'summary':content[:240]})
-            c.execute('INSERT INTO usage (bot_id,gateway,model,prompt_tokens,completion_tokens,cost,created_at) VALUES (?,?,?,?,?,?,?)',
-                      (bot_id, gateway, model, usage.get('prompt_tokens',0), usage.get('completion_tokens',0), usage.get('cost'), time.time()))
+            reservation = c.execute('SELECT * FROM budget_reservations WHERE run_id=?', (job['id'],)).fetchone()
+            if reservation:
+                prompt_tokens, completion_tokens = usage.get('prompt_tokens'), usage.get('completion_tokens')
+                if type(prompt_tokens) is int and type(completion_tokens) is int and prompt_tokens >= 0 and completion_tokens >= 0:
+                    c.execute('INSERT INTO usage (bot_id,gateway,model,prompt_tokens,completion_tokens,cost,created_at) VALUES (?,?,?,?,?,?,?)', (bot_id,gateway,model,prompt_tokens,completion_tokens,None,time.time()))
+                    usage_id = c.execute('SELECT last_insert_rowid()').fetchone()[0]
+                    cost = None if job.get('uncertain') else settle(c,job['id'],usage_id,prompt_tokens,completion_tokens)
+                    if cost is None:
+                        c.execute("UPDATE budget_reservations SET status='uncertain', usage_id=? WHERE run_id=? AND status IN ('reserved','uncertain')", (usage_id,job['id']))
+                        values['warning'] = 'Gateway charges could not be verified. Further spending is blocked pending reconciliation.'
+                else:
+                    c.execute("UPDATE budget_reservations SET status='uncertain' WHERE run_id=? AND status='reserved'", (job['id'],))
+                    values['warning'] = 'Gateway did not report token usage. Further spending is blocked pending reconciliation.'
+            else:
+                c.execute('INSERT INTO usage (bot_id,gateway,model,prompt_tokens,completion_tokens,cost,created_at) VALUES (?,?,?,?,?,?,?)', (bot_id, gateway, model, usage.get('prompt_tokens',0), usage.get('completion_tokens',0), usage.get('cost'), time.time()))
+        else:
+            c.execute("UPDATE budget_reservations SET status=? WHERE run_id=? AND status='reserved'", ('uncertain' if job.get('dispatched') else 'released',job['id']))
+            if job.get('dispatched'):
+                values['message'] = values.get('message','Run stopped.') + ' Gateway charges are unknown; reconcile them before further spending.'
         record_event(c, job['id'], 'bot.state_changed', {'state':'done' if status == 'done' else 'error' if status == 'failed' else 'idle'})
         record_event(c, job['id'], kind, values)
         c.execute('UPDATE runs SET status=?,updated_at=? WHERE id=?', (status, time.time(), job['id']))
@@ -431,13 +535,15 @@ def bot_system_prompt(bot):
     return bot['personality'] + '\nYou are ' + bot['name'] + '. Your job title is ' + (bot.get('title') or 'Personal assistant') + '. Perform that job for the user.'
 
 async def run_chat(job, bot, history, profile):
-    entries=json.loads(config('profiles')).get(profile,[])
+    entries=job.get('entries') or json.loads(config('profiles')).get(profile,[])
     for entry in entries:
         emitted=False
         try:
             url, headers=gateway_config(entry['gateway'])
             payload={'model':entry['model'], 'messages':[{'role':'system','content':bot_system_prompt(bot)}, *history], 'stream':True, 'stream_options':{'include_usage':True}}
+            if job.get('max_completion_tokens') is not None: payload['max_tokens']=job['max_completion_tokens']
             async with httpx.AsyncClient(timeout=httpx.Timeout(90, connect=10), follow_redirects=False) as client:
+                job['dispatched']=True
                 async with client.stream('POST', url+'/chat/completions', headers=headers, json=payload) as response:
                     response.raise_for_status()
                     content=''; usage={}
@@ -477,6 +583,7 @@ async def run_chat(job, bot, history, profile):
             user_stopped = job.get('user_cancelled', False)
             finish_run(job, 'cancelled' if user_stopped else 'failed', 'error', {'message':'Response stopped.' if user_stopped else 'The backend stopped before this response finished. Please try again.'}); return
         except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
+            if job.get('dispatched'): job['uncertain']=True
             # Only fail over on transient gateway errors or invalid/empty responses.
             status = exc.response.status_code if isinstance(exc,httpx.HTTPStatusError) else None
             if emitted or (status is not None and status not in (429,500,502,503,504)):
@@ -500,14 +607,27 @@ async def chat(bot_id: str, body: ChatIn, request: Request):
         for field in ('name','title','personality'):
             bot[field] = redact_text(bot[field], keys)
         now=time.time()
+        chosen_profile=body.profile or bot['profile']
+        entries=json.loads(c.execute('SELECT value FROM config WHERE key=?', ('profiles',)).fetchone()['value']).get(chosen_profile,[])
+        previous=[{'role':r['role'],'content':r['content']} for r in c.execute('SELECT role,content FROM messages WHERE bot_id=? ORDER BY created_at DESC LIMIT 39',(bot_id,)).fetchall()][::-1]
+        history=[*previous,{'role':'user','content':content}]
+        price=c.execute('SELECT * FROM budget_prices WHERE profile=?', (chosen_profile,)).fetchone()
+        if price:
+            # Conservative byte estimate with protocol overhead, not a guarantee
+            # for unknown tokenizers or gateways that add unreported tokens.
+            prompt_bound = len(bot_system_prompt(bot).encode('utf-8')) + sum(len(item['content'].encode('utf-8')) for item in history) + 1024 + 128*(len(history)+1)
+            if prompt_bound > price['max_prompt_tokens']:
+                raise HTTPException(400, 'Message and conversation exceed the configured prompt token safety bound for this profile.')
+        try:
+            reserve(c, job_id, bot_id, chosen_profile, now, attempts=len(entries))
+        except BudgetError as exc: raise HTTPException(402, str(exc)) from exc
         c.execute('INSERT INTO runs VALUES (?,?,?,?,?)', (job_id,bot_id,'running',now,now))
         append_event(c, bot_id, job_id, 'run.started', {'status':'running'})
         record_event(c, job_id, 'bot.state_changed', {'state':'working'})
         message_id = str(uuid.uuid4())
         c.execute('INSERT INTO messages VALUES (?,?,?,?,?)',(message_id,bot_id,'user',content,now))
         append_event(c, bot_id, job_id, 'message.sent', {'message_id':message_id, 'role':'user', 'summary':content[:240]})
-        history=[{'role':r['role'],'content':r['content']} for r in c.execute('SELECT role,content FROM messages WHERE bot_id=? ORDER BY created_at DESC LIMIT 40',(bot_id,)).fetchall()][::-1]
-    job={'id':job_id,'bot_id':bot_id,'done':False,'created':time.time(),'notify':asyncio.Event()}; jobs[job_id]=job
+    job={'id':job_id,'bot_id':bot_id,'done':False,'created':time.time(),'notify':asyncio.Event(),'entries':entries,'max_completion_tokens':price['max_completion_tokens']}; jobs[job_id]=job
     job['task']=asyncio.create_task(run_chat(job,bot,history,body.profile or bot['profile']))
     def finish_unexpected(task):
         if not job['done']:

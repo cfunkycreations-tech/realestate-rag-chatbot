@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 import pytest
 
 import app as service
-from funkbot.budget import BudgetError, dollars_to_nanos, period_starts, reserve, settle, token_cost_nanos
+from funkbot.budget import BudgetError, dollars_to_nanos, limit_to_nanos, period_starts, reserve, settle, token_cost_nanos
 
 
 def price(profile='smart', prompt='1', completion='2', max_prompt=1000, max_completion=500):
@@ -22,6 +22,7 @@ def reservation(run, bot='one', now=None):
 def test_decimal_prices_and_utc_boundaries():
     assert token_cost_nanos(1,2,'0.1','0.2') == 500
     assert dollars_to_nanos('0.0000000001') == 1
+    assert limit_to_nanos('0.0000000001') == 0
     for value in ('NaN','Infinity','-1','1000001'):
         with pytest.raises(BudgetError): dollars_to_nanos(value)
     for usage in [(-1,0),(None,1),(True,1)]:

@@ -5,7 +5,7 @@ hold an SQLite BEGIN IMMEDIATE transaction around reservation and use an
 explicit gateway token bound. Prices are configured, never inferred.
 """
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation, ROUND_CEILING
+from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR
 import time
 
 NANOS_PER_DOLLAR = 1_000_000_000
@@ -25,6 +25,12 @@ def dollars_to_nanos(value):
         return int((amount * NANOS_PER_DOLLAR).to_integral_value(rounding=ROUND_CEILING))
     except (InvalidOperation, TypeError) as exc:
         raise BudgetError('Enter a valid dollar amount.') from exc
+
+
+def limit_to_nanos(value):
+    # A ceiling must never round upward and authorize more than the owner set.
+    dollars_to_nanos(value)  # validate range and finiteness first
+    return int((Decimal(str(value)) * NANOS_PER_DOLLAR).to_integral_value(rounding=ROUND_FLOOR))
 
 
 def token_cost_nanos(prompt_tokens, completion_tokens, prompt_price, completion_price):
@@ -90,7 +96,7 @@ def reserve(c, run_id, bot_id, profile, now, attempts=1):
                 raise BudgetError(f'{scope} has an unreconciled run in this {period} period; spending cannot be verified.')
             spent += sum(row['actual_nanos'] if row['status'] == 'settled' else row['reserved_nanos'] for row in reservations)
             if spent + maximum > cap:
-                raise BudgetError(f'{scope} {period} budget cap would be exceeded by the maximum possible run cost.')
+                raise BudgetError(f'{scope} {period} budget cap would be exceeded by the configured reservation for this run.')
     c.execute('''INSERT INTO budget_reservations
         (run_id,bot_id,profile,created_at,reserved_nanos,prompt_usd_per_million,completion_usd_per_million,max_prompt_tokens,max_completion_tokens,status)
         VALUES (?,?,?,?,?,?,?,?,?,'reserved')''', (run_id,bot_id,profile,now,maximum,price['prompt_usd_per_million'],price['completion_usd_per_million'],price['max_prompt_tokens'],price['max_completion_tokens']))

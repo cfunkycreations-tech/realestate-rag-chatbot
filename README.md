@@ -8,7 +8,7 @@ Funk Bot is a local-first personal assistant workspace. This repository is a **p
 2. In PowerShell, run `Copy-Item .env.example .env` and `docker compose up --build`.
 3. For a new installation only, open another PowerShell window in the project folder and run `docker compose logs backend`. Find the **first-run setup code**. Open `http://localhost:3000`, enter that code and create a password and Bot. Existing installations retain their password and do not need a setup code.
 4. Open **Settings → Gateways**, save an OpenRouter key (or configure OmniRoute at `http://localhost:20128`), then test the saved connection. Keys are encrypted on disk and never returned by the API.
-5. Check **Model profiles**: choose models available through your gateway. Send your Bot a message.
+5. Check **Model profiles**, then open **Settings → Budget**. Enter the input/output prices per million tokens and token bounds for every profile you use, using the highest prices among its fallback models. No price is assumed. Adjust the default $5/day account and per-Bot limits if needed; monthly limits are optional. Then send your Bot a message.
 
 Docker volumes retain the database, vault key, and OmniRoute data across restarts. For upgrades, rebuild from the same project folder and Compose project name so the existing volumes are reused; do not run `docker compose down -v`, which deletes them. Back up the entire `funk_data` volume: the database and vault key are both needed to recover saved credentials. The OmniRoute container uses the upstream image. Its first start needs network access; check its logs if it fails. Never expose its dashboard publicly.
 
@@ -58,7 +58,7 @@ Select a Bot to open its spotlight and chat. Quick Mission sends to the selected
 
 ### Browser screenshots
 
-The checked-in screenshots under `docs/screenshots` were captured with Playwright against a **disposable test installation** with synthetic Bots, artwork, and mock-gateway activity; they are not your data. To repeat, first set up a separate test installation with at least one Bot and a working test gateway. This test sends a message, so **never point it at your real installation**:
+The checked-in screenshots under `docs/screenshots` were captured with Playwright against a **disposable test installation** with synthetic Bots, artwork, and mock-gateway activity; they are not your data. To repeat, first set up a separate test installation with at least one Bot and a working test gateway. This test sends a message, so **never point it at your real installation**. In that disposable installation, configure the test profile price and token bounds under Budget first:
 
 ```powershell
 Set-Location frontend
@@ -106,15 +106,30 @@ $env:E2E_SETUP_TOKEN = "your-disposable-setup-code"
 npm run test:banner
 ```
 
+### Budget browser check
+
+The budget check imports synthetic artwork and creates a Bot, and deliberately checks that a zero account cap refuses a message before it reaches a gateway. Use a **fresh disposable installation only**:
+
+```powershell
+Set-Location frontend
+npm ci
+npx playwright install chromium
+$env:E2E_URL = "http://localhost:3000"
+$env:E2E_SETUP_TOKEN = "your-disposable-setup-code"
+npm run test:budget
+```
+
 ## Current behavior and limitations
 
-**No spending caps are implemented yet.** Funk Bot cannot prevent a runaway run from consuming gateway credits. Set limits with your provider and do not leave the app unattended.
+**Budget safeguards are not a guarantee of provider billing.** Funk Bot reserves against account and per-Bot daily/monthly caps before chat requests, but it depends on accurate configured prices, a conservative input-token bound, and the gateway honoring output limits and reporting usage. Tokenization overhead, gateway-added charges, incorrect prices, providers that ignore limits, and spending outside Funk Bot can exceed these estimates. Always set provider-side limits and do not leave runs unattended.
+
+Open **Settings → Budget** to set caps and profile prices. The account and each Bot default to $5/day; monthly limits are disabled until configured. Periods use UTC. Each run reserves for every possible fallback; no configured price means the run is refused. Costs for new runs are calculated from reported input/output tokens and the profile's configured prices, not inferred from a model name. If an attempt fails, is interrupted, exceeds configured token bounds, or does not report usage, further spending is blocked until you verify its total in your gateway billing and enter the charge and source in Budget. These owner-supplied corrections are audited. Old usage without a cost must likewise be reconciled when it falls within a capped period. Existing Bots, keys, sprites and messages are not deleted by the budget migrations.
 
 - Each Bot has its own stored timeline and identity. The last 40 messages are sent as context; this is conversation history, not semantic memory. Deleting a Bot deletes its messages.
 - The database uses SQLAlchemy connections with Alembic migrations, adopting existing slice databases without replacing their rows. SQL queries and migrations remain SQLite-specific; PostgreSQL support is not implemented. Back up the full data volume before upgrading.
 - Chat runs in the backend and can finish after the browser closes, provided the backend keeps running. Run records and streamed events are stored in SQLite. Reopening a Bot reconnects to an active run; after a backend restart, unfinished runs are marked failed and surfaced in that Bot’s chat rather than automatically resumed. Run the backend with one worker only. Provider text streams through a sliding-window redactor for saved gateway keys and common key patterns. The filter deliberately delays a small tail of text and cannot detect all possible secrets.
 - Profiles attempt entries in order for rate limits, server failures, connection errors, and empty responses. Client errors stop the chain. The app does not yet implement tool calling or tool-call fallback.
-- Costs and token totals are shown only when gateways report them. No hard budget cap is enforced.
+- Token totals come from reported usage. Known costs include configured-price token charges and owner-reconciled amounts; unknown charges are disclosed rather than treated as free. Caps are reservation-based estimates, not provider-enforced billing limits.
 - Vault encryption protects database contents from casual inspection, but its key is stored alongside the data on the same host. Protect filesystem access and backups. Messages and provider output are redacted for saved gateway keys and common key patterns; no redaction is perfect.
 - The authenticated `/api/events?since=0` endpoint exposes cursor-ordered run starts, message summaries, state changes, errors, and finishes recorded after this upgrade. Existing slice-2 events remain in per-run history and are not backfilled. Deleting a Bot deletes its event history. This is not a complete audit log. No search, file access, MCP, scheduler, webhook, sandbox, approvals, notifications, PWA, export, or browser/computer features are provided in this slice. The UI intentionally does not advertise those as working.
 - Provider names and defaults are configuration examples, not a guarantee that models are currently available. A working account/key and gateway configuration are required for live inference.
