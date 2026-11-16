@@ -144,6 +144,6 @@ def test_restore_upgrades_older_snapshot_only_in_isolated_stage(tmp_path):
         r=c.post('/api/workspace/restore',content=out.getvalue(),headers={'content-type':'application/zip'});assert r.status_code==200,r.text
         stage=service.DATA/'restores'/r.json()['staged_id']
         with sqlite3.connect(stage/'funk.db') as db:
-            assert db.execute('SELECT version_num FROM alembic_version').fetchone()[0]=='0030_delegation_pairs'
+            assert db.execute('SELECT version_num FROM alembic_version').fetchone()[0]=='0031_employee_dna'
             assert db.execute('SELECT name FROM bots').fetchone()[0]=='Preserved'
         with sqlite3.connect(old/'funk.db') as db: assert db.execute('SELECT version_num FROM alembic_version').fetchone()[0]=='0019_attachments'

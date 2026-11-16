@@ -41,10 +41,10 @@ from funkbot.memory_capture import save_learned, capture as capture_memory, norm
 from funkbot.skills import parse_invocation, parse_markdown
 from funkbot.schedule import next_occurrence
 from funkbot.backup import create as create_backup, restore as stage_restore, validate_stage, BackupError, MAX_TOTAL as MAX_BACKUP_TOTAL
-from funkbot import workspace_pointer
+from funkbot import workspace_pointer, careers
 from alembic.config import Config as AlembicConfig
 from alembic.script import ScriptDirectory
-from funkbot.vault import MAX_ARCHIVE, VaultError, character_for_bot, draw_character, import_zip
+from funkbot.vault import MAX_ARCHIVE, VaultError, character_for_bot, draw_character, import_zip, normal_name
 from funkbot.budget import BudgetError, NANOS_PER_DOLLAR, dollars_to_nanos, limit_to_nanos, limits_for, reconcile_run, reconcile_usage, reserve, reserve_followup, settle, token_cost_nanos
 from funkbot.tool_policy import WebPolicy
 from funkbot import browser_network, computer, computer_snapshot
@@ -488,6 +488,87 @@ def create_bot(body: BotIn, request: Request):
     return {'id':id,'character':redact_character(character, configured_secrets()) if character else None}
 
 
+# ---- Employee DNA: role presets (Career DNA) and career-aware birth ----
+MAX_BOTS = int(os.getenv('FUNK_MAX_BOTS', '100'))
+
+class RolePackIn(BaseModel):
+    presets: list[dict] = Field(min_length=1, max_length=careers.MAX_PRESETS_PER_IMPORT)
+    overwrite_customized: bool = False
+
+class BirthIn(BaseModel):
+    mode: str = Field(pattern='^(choose|surprise)$')
+    preset_id: str | None = Field(default=None, max_length=64)
+    adopt_character_name: bool = True
+
+@app.post('/api/role-presets/import')
+def import_role_presets(body: RolePackIn, request: Request):
+    require_auth(request)
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        try: results=careers.import_presets(c, body.presets, overwrite_customized=body.overwrite_customized)
+        except careers.PresetError as exc: raise HTTPException(400,str(exc))
+    tally={}
+    for item in results: tally[item['outcome']]=tally.get(item['outcome'],0)+1
+    return {'results':results,'summary':tally}
+
+@app.get('/api/role-presets')
+def role_presets(request: Request):
+    require_auth(request)
+    with db() as c: return careers.list_presets(c)
+
+@app.get('/api/role-presets/export')
+def export_role_presets(request: Request):
+    require_auth(request)
+    with db() as c: return careers.export_presets(c)
+
+@app.put('/api/role-presets/{preset_id}')
+def update_role_preset(preset_id: str, body: dict, request: Request):
+    require_auth(request)
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        try: version=careers.update_preset(c, preset_id, body)
+        except KeyError: raise HTTPException(404,'Role preset not found.')
+        except careers.PresetError as exc: raise HTTPException(400,str(exc))
+    return {'id':preset_id,'version':version}
+
+@app.get('/api/role-presets/{preset_id}/versions')
+def role_preset_versions(preset_id: str, request: Request):
+    require_auth(request)
+    with db() as c:
+        rows=c.execute('SELECT version,content_hash,source,created_at FROM role_preset_versions WHERE preset_id=? ORDER BY version',(preset_id,)).fetchall()
+    if not rows: raise HTTPException(404,'Role preset not found.')
+    return [dict(r) for r in rows]
+
+@app.post('/api/bots/birth')
+def birth_bot(body: BirthIn, request: Request):
+    require_auth(request)
+    keys=configured_secrets()
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        if c.execute('SELECT count(*) FROM bots').fetchone()[0]>=MAX_BOTS:
+            raise HTTPException(409,f'Workforce capacity reached ({MAX_BOTS} Bots). Remove a Bot or raise FUNK_MAX_BOTS.')
+        if body.mode=='choose' and not body.preset_id: raise HTTPException(400,'preset_id is required for mode "choose".')
+        preset_id=body.preset_id if body.mode=='choose' else careers.pick_surprise_preset(c)
+        preset=careers.get_preset(c,preset_id) if preset_id else None
+        if body.mode=='choose' and not preset: raise HTTPException(404,'Role preset not found.')
+        if not preset or preset['status']!='active': raise HTTPException(409,'No active role preset available. Import a role pack first.')
+        id=str(uuid.uuid4())
+        c.execute('INSERT INTO bots VALUES (?,?,?,?,?,?,?,?)',(id,'New Employee',redact(preset['title']),redact(careers.compose_personality(preset)),'lavender','round','smart',time.time()))
+        character=draw_character(c,id)
+        if character and body.adopt_character_name:
+            c.execute('UPDATE bots SET name=? WHERE id=?',(redact_text(character['name'],keys),id))
+        careers.install_career(c,id,preset,birth_mode=body.mode)
+        career=careers.get_career(c,id)
+    return {'id':id,'mode':body.mode,'character':redact_character(character,configured_secrets()) if character else None,'career':career}
+
+@app.get('/api/bots/{bot_id}/career')
+def bot_career(bot_id: str, request: Request):
+    require_auth(request)
+    with db() as c:
+        if not c.execute('SELECT 1 FROM bots WHERE id=?',(bot_id,)).fetchone(): raise HTTPException(404,'Bot not found.')
+        return {'career':careers.get_career(c,bot_id)}
+
+
 @app.post('/api/bots/{bot_id}/duplicate')
 def duplicate_bot(bot_id: str, request: Request):
     require_auth(request)
@@ -686,7 +767,32 @@ def vault_status(request: Request):
     require_auth(request)
     with db() as c:
         row=c.execute('SELECT COUNT(*) as total, COALESCE(SUM(CASE WHEN drawn=0 THEN 1 ELSE 0 END),0) as available FROM characters').fetchone()
-    return dict(row)
+        unpacked=c.execute('SELECT COUNT(*) FROM characters WHERE id NOT IN (SELECT character_id FROM pack_characters)').fetchone()[0]
+    return {**dict(row), 'unpacked':unpacked}
+
+def pack_name_for(collection: str, filename: str):
+    stem=Path((filename or '').replace('\\','/')).stem.strip()
+    return (collection.strip() or stem or 'Uploaded pack')[:60]
+
+@app.get('/api/vault/packs')
+def vault_packs(request: Request):
+    require_auth(request)
+    keys=configured_secrets()
+    with db() as c:
+        rows=c.execute("""SELECT p.id,p.name,p.file_name,p.file_hash,p.added,p.duplicates,p.invalid,p.created_at,
+                          COUNT(pc.character_id) AS characters,
+                          COALESCE(SUM(CASE WHEN ch.drawn=0 THEN 1 ELSE 0 END),0) AS available,
+                          COALESCE(SUM(CASE WHEN EXISTS(SELECT 1 FROM bot_characters bc WHERE bc.character_id=pc.character_id) THEN 1 ELSE 0 END),0) AS in_use
+                          FROM character_packs p LEFT JOIN pack_characters pc ON pc.pack_id=p.id
+                          LEFT JOIN characters ch ON ch.id=pc.character_id
+                          GROUP BY p.id ORDER BY p.created_at DESC""").fetchall()
+    result=[]
+    for row in rows:
+        item=dict(row)
+        item['name']=redact_text(item['name'],keys)
+        item['file_name']=redact_text(item['file_name'],keys)
+        result.append(item)
+    return result
 
 @app.post('/api/vault/import')
 async def vault_import(request: Request, file: UploadFile = File(...), collection: str = Form(default="", max_length=60)):
@@ -695,14 +801,53 @@ async def vault_import(request: Request, file: UploadFile = File(...), collectio
         data=await file.read(MAX_ARCHIVE+1)
         if len(data)>MAX_ARCHIVE: raise VaultError('ZIP is too large (maximum 20 MB).')
         keys=configured_secrets()
+        digest=hashlib.sha256(data).hexdigest()
+        file_name=redact_text(Path((file.filename or 'pack.zip').replace('\\','/')).name[:120],keys)
+        name=redact_text(pack_name_for(collection,file_name),keys)
+        pack_id=str(uuid.uuid4())
         with db() as c:
             c.execute('BEGIN IMMEDIATE')
-            result=import_zip(data,c,DATA / 'vault',keys,collection.strip())
+            same=c.execute('SELECT name FROM character_packs WHERE file_hash=?',(digest,)).fetchone()
+            if same:
+                raise HTTPException(409,f'This pack was already uploaded as "{same["name"]}". Remove it first if you want to upload it again.')
+            if c.execute('SELECT 1 FROM character_packs WHERE normalized_name=?',(normal_name(name),)).fetchone():
+                raise HTTPException(409,f'A pack named "{name}" already exists. Rename the collection tag to upload a different pack.')
+            c.execute('INSERT INTO character_packs VALUES (?,?,?,?,?,?,?,?,?)',(pack_id,name,normal_name(name),file_name,digest,0,0,0,time.time()))
+            result=import_zip(data,c,DATA / 'vault',keys,collection.strip(),pack_id)
+            if result['added']==0:
+                # Nothing new (or nothing valid): do not record an empty pack.
+                raise HTTPException(409,f"Nothing new in this ZIP: {result['duplicates']} characters are already in your Vault and {result['invalid']} files were invalid.")
+            c.execute('UPDATE character_packs SET added=?,duplicates=?,invalid=? WHERE id=?',(result['added'],result['duplicates'],result['invalid'],pack_id))
         return result
     except VaultError as exc:
         raise HTTPException(400,str(exc)) from exc
     finally:
         await file.close()
+
+@app.delete('/api/vault/packs/{pack_id}')
+def vault_remove_pack(pack_id: str, request: Request):
+    require_auth(request)
+    doomed=[]
+    kept=0
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        if not c.execute('SELECT 1 FROM character_packs WHERE id=?',(pack_id,)).fetchone():
+            raise HTTPException(404,'Pack not found.')
+        rows=c.execute("""SELECT pc.character_id AS id, EXISTS(SELECT 1 FROM bot_characters bc WHERE bc.character_id=pc.character_id) AS used
+                          FROM pack_characters pc WHERE pc.pack_id=?""",(pack_id,)).fetchall()
+        for row in rows:
+            if row['used']:
+                kept+=1
+            else:
+                doomed.append(row['id'])
+        for character_id in doomed:
+            c.execute('DELETE FROM pack_characters WHERE character_id=?',(character_id,))
+            c.execute('DELETE FROM characters WHERE id=?',(character_id,))
+        c.execute('DELETE FROM pack_characters WHERE pack_id=?',(pack_id,))
+        c.execute('DELETE FROM character_packs WHERE id=?',(pack_id,))
+    for character_id in doomed:
+        (DATA / 'vault' / (character_id + '.png')).unlink(missing_ok=True)
+    return {'removed':len(doomed),'kept_in_use':kept}
 
 @app.get('/api/bots/{bot_id}/messages')
 def messages(bot_id: str, request: Request):
