@@ -1915,7 +1915,8 @@ async def start_chat(bot_id: str, body: ChatIn, mission_id: str | None = None, g
         bot['computer_enabled']=not (lab_step_id or internal_draft) and computer.enabled() and computer.permission(c,bot_id)['allowed']
         requested_profile=body.profile or bot['profile']
         delegation=economy.delegation_for(c,mission_id)
-        chosen_profile,career_tier,adjustment=economy.choose_profile(c,bot,requested_profile,bool(body.profile),delegation)
+        # Lab runs compare profiles on purpose: never relabel them.
+        chosen_profile,career_tier,adjustment=(requested_profile,None,None) if lab_step_id else economy.choose_profile(c,bot,requested_profile,bool(body.profile),delegation)
         economy_on=economy.settings(c)['economy']['enabled']
         bot['computer_desktop']=bot['computer_enabled'] and computer.desktop_enabled() and chosen_profile=='vision'
         bot['connector_catalog']=[] if (lab_step_id or internal_draft) else [{'id':x['id'],'name':redact_text(x['name'],keys),'tools':[redact_text(t,keys) for t in x['tools']]} for x in connector_catalog(c)]
@@ -1954,7 +1955,7 @@ async def start_chat(bot_id: str, body: ChatIn, mission_id: str | None = None, g
         # for unknown tokenizers or gateways that add unreported tokens.
         bound = prompt_bound([{'role':'system','content':bot_system_prompt(bot)},*history],[] if (lab_step_id or internal_draft) else declarations(bool(bot.get('connector_catalog')),bool(bot.get('handoff_catalog')),bool(mission_id),bool(bot.get('search_enabled')),bool(bot.get('computer_enabled')),bool(bot.get('computer_desktop')),bool(bot.get('learn_memory')),True))
         # Budget fallback: only ever to a strictly cheaper, priced profile, and recorded.
-        candidates=[chosen_profile]+(economy.cheaper_profiles(c,chosen_profile) if economy.settings(c)['fallback']['enabled'] else [])
+        candidates=[chosen_profile]+(economy.cheaper_profiles(c,chosen_profile) if not lab_step_id and economy.settings(c)['fallback']['enabled'] else [])
         first_error=None;price=None;origin_id=delegation['origin_bot_id'] if delegation else None
         for candidate in candidates:
             candidate_price=c.execute('SELECT * FROM budget_prices WHERE profile=?', (candidate,)).fetchone()

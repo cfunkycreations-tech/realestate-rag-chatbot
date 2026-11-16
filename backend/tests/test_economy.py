@@ -39,7 +39,7 @@ def test_endpoints_need_auth_and_validate_input(monkeypatch):
         assert c.delete('/api/economy/model-flags?gateway=custom&model=m').status_code == 401
         setup(c)
         body = c.get('/api/economy').json()
-        assert body['economy']['enabled'] is False and body['fallback']['enabled'] is True
+        assert body['economy']['enabled'] is False and body['fallback']['enabled'] is False
         assert body['tier_policy'] == {'LIGHT': 'cheap-bulk', 'STANDARD': 'fast', 'ADVANCED': 'smart', 'RESEARCH': 'thinker'}
         assert body['alerts']['thresholds'] == [50, 80, 100]
         assert c.put('/api/economy', json={'tier_policy': {'LIGHT': 'nope', 'STANDARD': 'fast', 'ADVANCED': 'smart', 'RESEARCH': 'thinker'}}).status_code == 400
@@ -122,6 +122,10 @@ def test_budget_fallback_moves_only_to_a_cheaper_priced_profile_and_records_it(m
         bot = c.post('/api/bots', json={'name': 'Scout', 'profile': 'smart'}).json()['id']
         # smart reserves $0.009216, fast reserves $0.0009216. Cap sits between.
         assert c.put('/api/budget/limits/account', json={'daily': '0.005', 'monthly': None}).status_code == 200
+        assert c.get('/api/economy').json()['fallback']['enabled'] is False  # opt-in
+        refused = c.post(f'/api/bots/{bot}/chat', json={'content': 'Hi'})
+        assert refused.status_code == 402 and 'daily budget cap' in refused.text
+        assert c.put('/api/economy', json={'fallback': {'enabled': True}}).status_code == 200
         run = c.post(f'/api/bots/{bot}/chat', json={'content': 'Hi'}).json()['job_id']; finish(c, run)
         a = attribution(run)
         assert (a['requested_profile'], a['effective_profile']) == ('smart', 'fast') and 'budget_fallback:smart->fast' in a['adjustment']
@@ -278,3 +282,41 @@ def test_alert_and_attribution_tables_survive_bot_deletion_and_backup_shape():
         with service.db() as db:
             names = {r['name'] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         assert {'run_attribution', 'delegation_origins', 'model_flags', 'usage_flags', 'budget_alerts'} <= names
+
+
+def test_tier_never_moves_a_bot_to_an_unpriced_or_costlier_profile(monkeypatch):
+    FakeClient.responses = [answer(), answer()]
+    monkeypatch.setattr(service.httpx, 'AsyncClient', FakeClient)
+    with TestClient(service.app) as c:
+        setup(c); configure_budget(c)  # only smart is priced
+        light = c.post('/api/bots', json={'name': 'Light', 'profile': 'smart'}).json()['id']
+        give_career(light, 'LIGHT')
+        run = c.post(f'/api/bots/{light}/chat', json={'content': 'Hi'}).json()['job_id']; finish(c, run)
+        a = attribution(run)
+        assert a['effective_profile'] == 'smart' and 'kept smart' in a['adjustment']
+        # A costlier tier profile is not applied to a Bot already on a cheaper one.
+        price(c, 'fast', '0.1', '0.2'); price(c, 'thinker', '5', '10')
+        research = c.post('/api/bots', json={'name': 'Research', 'profile': 'fast'}).json()['id']
+        give_career(research, 'RESEARCH')
+        run = c.post(f'/api/bots/{research}/chat', json={'content': 'Hi'}).json()['job_id']; finish(c, run)
+        assert attribution(run)['effective_profile'] == 'fast'
+
+
+def test_lab_runs_are_never_relabelled_by_economy_or_fallback(monkeypatch):
+    FakeClient.responses = [answer()]
+    monkeypatch.setattr(service.httpx, 'AsyncClient', FakeClient)
+    with TestClient(service.app) as c:
+        setup(c); configure_budget(c); price(c, 'fast', '0.1', '0.2')
+        c.put('/api/economy', json={'economy': {'enabled': True, 'ceiling_tier': 'STANDARD', 'prefer_free': True}, 'fallback': {'enabled': True}})
+        c.put('/api/budget/limits/account', json={'daily': '0.005', 'monthly': None})
+        bot = c.post('/api/bots', json={'name': 'Scout'}).json()['id']
+        eid = c.post('/api/lab', json={'bot_id': bot, 'prompt': 'Q', 'system_prompt': 'P', 'profiles': ['smart']}).json()['id']
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            item = c.get('/api/lab/' + eid).json()
+            if item['status'] in ('done', 'failed'): break
+            time.sleep(.02)
+        # smart does not fit the cap and the Lab asked for smart: it must fail, not quietly run on fast.
+        assert item['status'] == 'failed' and len(FakeClient.responses) == 1
+        with service.db() as db:
+            assert db.execute("SELECT COUNT(*) FROM budget_reservations WHERE profile='fast'").fetchone()[0] == 0

@@ -22,7 +22,7 @@ PROFILES = ('fast', 'smart', 'thinker', 'vision', 'cheap-bulk')
 DEFAULT_TIER_POLICY = {'LIGHT': 'cheap-bulk', 'STANDARD': 'fast', 'ADVANCED': 'smart', 'RESEARCH': 'thinker'}
 DEFAULT_ECONOMY = {'enabled': False, 'ceiling_tier': 'STANDARD', 'prefer_free': True}
 DEFAULT_ALERTS = {'thresholds': [50, 80, 100], 'enabled': True}
-DEFAULT_FALLBACK = {'enabled': True}
+DEFAULT_FALLBACK = {'enabled': False}
 
 
 def _load(c, key, default):
@@ -76,11 +76,17 @@ def save_settings(c, normalized):
 
 
 def profile_cost(c, profile):
-    """Reserved maximum for one attempt in nanodollars, or None when unpriced."""
+    """Reserved maximum for one run on `profile` in nanodollars (price x every
+    configured fallback model, as reserve() charges), or None when unpriced."""
     p = c.execute('SELECT * FROM budget_prices WHERE profile=?', (profile,)).fetchone()
     if not p:
         return None
-    return token_cost_nanos(p['max_prompt_tokens'], p['max_completion_tokens'], p['prompt_usd_per_million'], p['completion_usd_per_million'])
+    row = c.execute("SELECT value FROM config WHERE key='profiles'").fetchone()
+    try:
+        attempts = len(json.loads(row['value']).get(profile, [])) if row else 1
+    except (ValueError, TypeError, AttributeError):
+        attempts = 1
+    return token_cost_nanos(p['max_prompt_tokens'], p['max_completion_tokens'], p['prompt_usd_per_million'], p['completion_usd_per_million']) * max(1, attempts)
 
 
 def bot_tier(c, bot_id):
@@ -103,8 +109,14 @@ def choose_profile(c, bot, requested, explicit, delegation=None):
     if tier and not explicit and requested != 'vision':
         target = s['tier_policy'].get(tier)
         if target and target != profile:
-            profile = target
-            notes.append(f'tier:{tier}->{target}')
+            # A tier may only move a Bot to a priced profile that reserves no
+            # more than the Bot's own. Otherwise the Bot keeps its profile.
+            own, want = profile_cost(c, profile), profile_cost(c, target)
+            if want is not None and (own is None or want <= own):
+                profile = target
+                notes.append(f'tier:{tier}->{target}')
+            else:
+                notes.append(f'tier:{tier}:kept {profile}')
     if profile != 'vision' and s['economy']['enabled']:
         ceiling = s['tier_policy'].get(s['economy']['ceiling_tier'])
         cost, cap = profile_cost(c, profile), profile_cost(c, ceiling) if ceiling else None

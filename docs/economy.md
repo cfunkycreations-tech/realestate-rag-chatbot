@@ -24,7 +24,10 @@ model is billed at the profile price, which is the conservative figure.
 Role tiers map to the existing five profiles (editable, `PUT /api/economy`):
 LIGHT → cheap-bulk, STANDARD → fast, ADVANCED → smart, RESEARCH → thinker.
 Applies only to Bots that have a career and only when the chat did not name a
-profile. Bots without a career are unchanged. `vision` is never moved.
+profile. Bots without a career are unchanged. `vision` is never moved. A tier moves a Bot
+only to a priced profile that reserves no more than the Bot's own (reserve = price x every
+fallback model); otherwise the Bot keeps its profile. Lab runs are never re-profiled.
+Only `create_handoff` lets a Bot start another Bot's work; DMs and group turns are owner-started.
 
 ## Economy Mode (owner-controlled, off by default)
 When on, a run whose profile reserves more than the ceiling tier's profile is
@@ -39,7 +42,7 @@ so OmniRoute is never assumed free.
 
 ## Limits, fallback and alerts
 - Account and per-Bot caps are enforced exactly as before.
-- Budget fallback (on by default, toggle in settings): when the reservation does
+- Budget fallback (opt-in, off by default so existing refusals are unchanged): when the reservation does
   not fit a cap, try strictly cheaper priced profiles, dearest first. Never a
   costlier one, never an unpriced one. The change is recorded in `adjustment`.
   If nothing fits, the original error is returned (HTTP 402).
