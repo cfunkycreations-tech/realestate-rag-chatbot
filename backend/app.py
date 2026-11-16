@@ -41,7 +41,7 @@ from funkbot.memory_capture import save_learned, capture as capture_memory, norm
 from funkbot.skills import parse_invocation, parse_markdown
 from funkbot.schedule import next_occurrence
 from funkbot.backup import create as create_backup, restore as stage_restore, validate_stage, BackupError, MAX_TOTAL as MAX_BACKUP_TOTAL
-from funkbot import workspace_pointer, careers, economy
+from funkbot import workspace_pointer, careers, economy, mission_control
 from alembic.config import Config as AlembicConfig
 from alembic.script import ScriptDirectory
 from funkbot.vault import MAX_ARCHIVE, VaultError, character_for_bot, draw_character, import_zip, normal_name
@@ -4219,6 +4219,13 @@ def team_overview(request: Request, day_start: float = Query(ge=0), bot_id: str 
         events.append(event)
     return {'bots':count,'runs_today':runs,'last_activity':last,'events':events,
             'states':{r['bot_id']:json.loads(r['payload'])['state'] for r in states if r['bot_id']}}
+
+
+@app.get('/api/mission-control')
+def get_mission_control(request: Request):
+    """One read-only summary for the banner gauges; counts only, no estimates."""
+    require_auth(request)
+    with db() as c: return mission_control.summary(c)
 
 
 class BannerPlacement(BaseModel):

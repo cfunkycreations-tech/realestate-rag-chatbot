@@ -300,3 +300,49 @@ input[type=file]::file-selector-button:hover{box-shadow:0 0 12px color-mix(in sr
 .career-tabs button[aria-selected=true]{border-bottom-color:var(--edge-bright)}
 
 .economy-panel h3{margin-top:22px}.economy-status{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0}.economy-panel select{width:100%}.economy-panel .check-row{display:flex;align-items:center;gap:8px}.economy-panel .check-row input{width:auto}.economy-flag{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:8px 0;border-top:1px solid var(--command-divider)}.economy-alerts{margin:8px 0;padding-left:18px;font-size:.9em}.economy-table{overflow-x:auto;margin-top:8px}.economy-table table{width:100%;border-collapse:collapse;font-size:.9em}.economy-table th,.economy-table td{text-align:left;padding:7px 10px;border-top:1px solid var(--command-divider);white-space:nowrap}.economy-table th{font-weight:600}.economy-table:focus-visible{outline:2px solid currentColor;outline-offset:2px}
+
+/* Mission Control HUD: glass instrument clusters layered over the banner. Tokens follow the active theme. */
+.command-banner{position:relative}
+.hud{--hud-mint:var(--edge-bright,#00ffb3);--hud-cyan:var(--accent,#1fa2ff);position:absolute;z-index:2;top:50%;transform:translateY(-50%);display:grid;grid-template-columns:auto minmax(0,1fr);grid-template-rows:1fr 1fr;gap:6px;width:min(340px,34%);max-height:calc(100% - 16px)}
+.hud-left{left:14px}.hud-right{right:62px}
+.hud-instrument{position:relative;display:flex;align-items:center;gap:9px;min-width:0;padding:6px 10px;text-align:left;color:var(--ink);background:color-mix(in srgb,var(--surf) 58%,transparent);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);border:1px solid color-mix(in srgb,var(--hud-mint) 45%,transparent);border-radius:10px;box-shadow:0 0 14px color-mix(in srgb,var(--hud-mint) 14%,transparent),inset 0 0 12px color-mix(in srgb,var(--hud-mint) 6%,transparent);transition:border-color .2s,box-shadow .2s,transform .2s}
+.hud-instrument:hover,.hud-instrument:focus-visible{border-color:var(--hud-mint);box-shadow:0 0 18px color-mix(in srgb,var(--hud-mint) 30%,transparent);transform:translateY(-1px)}
+.hud-instrument:focus-visible{outline:2px solid var(--hud-cyan);outline-offset:2px}
+.hud-arc{grid-row:1/3;flex-direction:column;justify-content:center;gap:2px;padding:6px 8px}
+.hud-arc svg{width:62px;height:62px;display:block;overflow:visible}
+.hud-track,.hud-fill{fill:none;stroke-width:5;stroke-linecap:round}
+.hud-track{stroke:color-mix(in srgb,var(--ink) 16%,transparent)}
+.hud-fill{stroke:var(--hud-tone,var(--hud-mint));filter:drop-shadow(0 0 3px var(--hud-tone,var(--hud-mint)));transition:stroke-dasharray .6s ease}
+.hud-needle{transition:transform .6s cubic-bezier(.3,1.3,.5,1)}
+.hud-needle line{stroke:var(--hud-cyan);stroke-width:2;stroke-linecap:round}.hud-needle circle{fill:var(--hud-cyan)}
+.hud-text{display:flex;flex-direction:column;min-width:0;line-height:1.15}
+.hud-arc .hud-text{align-items:center;text-align:center}
+.hud-text small{font:600 8.5px/1.2 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;letter-spacing:.12em;color:color-mix(in srgb,var(--ink) 78%,transparent);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.hud-text strong{font:700 15px/1.15 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:var(--hud-tone,var(--hud-mint));text-shadow:0 0 8px color-mix(in srgb,var(--hud-tone,var(--hud-mint)) 55%,transparent);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.hud-text em{font-style:normal;font-size:9.5px;color:color-mix(in srgb,var(--ink) 80%,transparent);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.hud-bar{flex-wrap:wrap;gap:3px 8px;align-content:center}
+.hud-bar .hud-text{flex:1 1 100%}
+.hud-bar-track{display:block;flex:1 1 100%;height:5px;border-radius:3px;background:color-mix(in srgb,var(--ink) 16%,transparent);overflow:hidden}
+.hud-bar-fill{display:block;height:100%;border-radius:3px;background:var(--hud-tone,var(--hud-mint));box-shadow:0 0 8px var(--hud-tone,var(--hud-mint));transition:width .6s ease}
+.hud-lamp{flex:none;width:11px;height:11px;border-radius:50%;background:var(--hud-tone,var(--hud-mint));box-shadow:0 0 10px var(--hud-tone,var(--hud-mint))}
+.hud-lamp.pulse{animation:hud-pulse 1.6s ease-in-out infinite}
+@keyframes hud-pulse{50%{opacity:.35;transform:scale(.8)}}
+.tone-ok{--hud-tone:var(--hud-mint)}.tone-info{--hud-tone:var(--hud-cyan)}.tone-warn{--hud-tone:#ffc247}.tone-bad{--hud-tone:#ff6b6b}.tone-idle{--hud-tone:color-mix(in srgb,var(--ink) 70%,transparent)}
+.hud-toggle{position:absolute;z-index:3;right:56px;top:15px;gap:4px;padding:5px 8px;font-size:10px;background:color-mix(in srgb,var(--surf) 80%,transparent);border:1px solid color-mix(in srgb,var(--hud-mint,#00ffb3) 35%,transparent)}
+.hud-toggle-mode{font:600 9px ui-monospace,monospace;letter-spacing:.1em;text-transform:uppercase}
+.hud.compact{grid-template-rows:auto auto;width:min(250px,28%)}
+.hud-instrument.compact{padding:4px 8px}.hud-arc.compact svg{width:44px;height:44px}.hud-instrument.compact .hud-text strong{font-size:12.5px}
+.hud:has(.hud-arc.compact) .hud-arc{grid-row:1/3}
+@media(max-width:900px){.hud{width:min(300px,38%)}.hud-text em{display:none}}
+@media(max-width:700px){
+ .hud,.hud.compact{top:auto;bottom:5px;transform:none;width:calc(50% - 10px);grid-template-columns:repeat(3,minmax(0,1fr));grid-template-rows:auto;gap:3px;max-height:none}
+ .hud-left{left:6px}.hud-right{right:6px}
+ .hud-instrument,.hud-instrument.compact{padding:3px 4px;gap:3px;border-radius:7px;min-height:34px;justify-content:center}
+ .hud-arc,.hud-arc.compact{grid-row:auto;flex-direction:row}
+ .hud-arc svg,.hud-arc.compact svg{width:22px;height:22px}
+ .hud-text small{font-size:6px;letter-spacing:.04em}.hud-text strong,.hud-instrument.compact .hud-text strong{font-size:9.5px}
+ .hud-arc .hud-text{align-items:flex-start;text-align:left}
+ .hud-lamp{width:7px;height:7px}.hud-bar-track{height:3px}
+ .hud-toggle{right:50px;top:12px}
+}
+@media(prefers-reduced-motion:reduce){.hud-needle,.hud-fill,.hud-bar-fill,.hud-instrument{transition:none}.hud-lamp.pulse{animation:none}}

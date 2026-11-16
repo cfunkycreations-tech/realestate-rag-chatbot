@@ -14,6 +14,7 @@
     "test:career": "node scripts/career-e2e.mjs",
     "test:role-pack": "node scripts/role-pack-e2e.mjs",
     "test:economy": "node scripts/economy-e2e.mjs",
+    "test:mission-control": "node scripts/mission-control-e2e.mjs",
     "test:visual": "node scripts/visual-pass-e2e.mjs",
     "test:banner": "node scripts/banner-e2e.mjs",
     "test:budget": "node scripts/budget-e2e.mjs",
