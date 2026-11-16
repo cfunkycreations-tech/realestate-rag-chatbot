@@ -22,6 +22,8 @@ goto cleanup
 >>"%LOG%" echo RESULT: FAIL - see command and output above.
 set "RESULT=1"
 :cleanup
+>>"%LOG%" echo ^> docker compose -p %PROJECT% --profile computer logs computer
+docker compose -p %PROJECT% --profile computer logs computer >>"%LOG%" 2>&1
 >>"%LOG%" echo Cleanup: stopping disposable project. No production volumes are touched.
 docker compose -p %PROJECT% --profile computer down --remove-orphans >>"%LOG%" 2>&1
 for %%V in (computer_control funk_data) do docker volume rm %PROJECT%_%%V >>"%LOG%" 2>&1
