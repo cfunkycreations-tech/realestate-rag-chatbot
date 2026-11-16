@@ -121,12 +121,12 @@ def test_repeated_similar_work_model_drafts_owner_approved_routine(monkeypatch):
     class Recording(FakeClient):
         def stream(self,*args,**kwargs): payloads.append(kwargs['json']);return super().stream(*args,**kwargs)
     monkeypatch.setattr(service.httpx,'AsyncClient',Recording)
-    FakeClient.responses=[response('{"similar":true,"title":"Weekly report summary","instructions":"Read and summarize the report for the owner."}')]
+    FakeClient.responses=[response('{"similar":true,"mission_ids":["learned-0","learned-1","learned-2"],"title":"Weekly report summary","instructions":"Read and summarize the report for the owner."}')]
     with TestClient(service.app) as c:
         setup(c);configure_budget(c);bot=c.post('/api/bots',json={'name':'Observer'}).json()['id']
         with service.db() as db:
             from funkbot.learned_routines import discover
-            texts=['Summarize the weekly report for the owner','Give my team an overview of our seven-day update','Prepare the manager’s digest of this week’s activity']
+            texts=['Summarize the weekly report for the owner','Give my team an overview of our seven-day update','Prepare the manager’s digest of this week’s activity','Find a restaurant for lunch']
             for i,text in enumerate(texts):
                 mid='learned-'+str(i)
                 db.execute('INSERT INTO missions VALUES (?,?,?,?,?,?,?,?,?)',(mid,'Weekly report',text,None,'done','Report summarized',None,1+i,1+i))
@@ -141,7 +141,7 @@ def test_repeated_similar_work_model_drafts_owner_approved_routine(monkeypatch):
             time.sleep(.1)
         assert len(suggestions)==1 and suggestions[0]['examples']==3
         assert suggestions[0]['instructions']=='Read and summarize the report for the owner.'
-        assert 'Report summarized' in payloads[0]['messages'][-1]['content'] and 'tools' not in payloads[0]
+        assert 'Report summarized' in payloads[0]['messages'][-1]['content'] and 'Find a restaurant' in payloads[0]['messages'][-1]['content'] and 'tools' not in payloads[0]
         assert any(n['kind']=='routine_suggestion' for n in c.get('/api/inbox/notices').json())
         assert c.get('/api/routines').json()==[]
         body={'title':'Weekly report','instructions':'Summarize the weekly report','bot_id':bot,'cron':'0 9 * * 1','timezone':'UTC'}
@@ -204,3 +204,27 @@ def test_scheduled_routine_runs_unattended_and_retries_once(monkeypatch):
         mission=c.get('/api/missions/'+history[0]['mission_id']).json()
         assert len(attempts)==2 and len(mission['runs'])==1
         assert any(n['kind']=='routine' and n['mission_id']==mission['id'] for n in c.get('/api/inbox/notices').json())
+
+
+def test_failed_scheduled_routine_notifies_only_after_one_retry(monkeypatch):
+    import time
+    from fastapi import HTTPException
+    attempts=[]
+    async def fail(*args,**kwargs):
+        attempts.append(True)
+        raise HTTPException(503,'Temporary startup failure')
+    monkeypatch.setattr(service,'start_chat',fail)
+    with TestClient(service.app) as c:
+        setup(c);bot=c.post('/api/bots',json={'name':'Scheduler'}).json()['id']
+        rid=c.post('/api/routines',json={'title':'Failing schedule','instructions':'Report','bot_id':bot,'cron':'0 9 * * *','timezone':'UTC'}).json()['id']
+        with service.db() as db: db.execute('UPDATE routines SET next_at=? WHERE id=?',(time.time()-1,rid))
+        for _ in range(30):
+            c.portal.call(service.routine_tick)
+            time.sleep(.05)
+            notices=c.get('/api/inbox/notices').json()
+            if notices: break
+        history=c.get(f'/api/routines/{rid}/runs').json()
+        assert len(attempts)==2 and history[0]['retry_count']==1 and history[0]['status']=='failed'
+        assert len(notices)==1 and 'Routine failed' in notices[0]['title']
+        c.portal.call(service.routine_tick)
+        assert len(c.get('/api/inbox/notices').json())==1
