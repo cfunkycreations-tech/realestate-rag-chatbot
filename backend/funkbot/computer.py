@@ -171,6 +171,7 @@ async def execute(context,command,expected_revision):
 _session=None
 _session_start_lock=asyncio.Lock()
 _ended_sessions=set()
+_session_outcomes={}
 
 
 def _decode_frame(value):
@@ -190,6 +191,7 @@ class DesktopSession:
 
     async def read(self):
         global _active,_channel,_frame,_session
+        outcome={'saved':False,'reason':'interrupted'}
         try:
             while True:
                 line=await self.reader.readline()
@@ -199,12 +201,15 @@ class DesktopSession:
                 if set(message)=={'frame'}:
                     _frame=_decode_frame(message['frame']);continue
                 if message.get('session')=='ended':
+                    if set(message)!={'session','reason','workspace'} or message['reason'] not in ('closed','idle_timeout','hard_timeout'): raise ToolError('Invalid session result.')
                     with self.context.db() as c:
                         c.execute('BEGIN IMMEDIATE')
                         row=c.execute('SELECT status,bot_id FROM runs WHERE id=?',(self.context.run_id,)).fetchone()
                         grant=permission(c,self.context.bot_id)
-                        if row and row['bot_id']==self.context.bot_id and row['status'] in ('running','waiting_approval','done') and grant['allowed'] and grant['revision']==self.revision:
-                            persist_workspace(c,self.context.bot_id,message['workspace'])
+                        if not row or row['bot_id']!=self.context.bot_id or row['status'] not in ('running','waiting_approval') or not grant['allowed'] or grant['revision']!=self.revision:
+                            raise ToolError('Run or computer permission changed before workspace save.')
+                        persist_workspace(c,self.context.bot_id,message['workspace'])
+                    outcome={'saved':True,'reason':message['reason']}
                     break
                 if 'id' in message:
                     if 'frame' in message: _frame=_decode_frame(message['frame'])
@@ -212,12 +217,15 @@ class DesktopSession:
                     if future and not future.done(): future.set_result(message)
                     continue
                 raise ToolError('Desktop session failed; an action may have run.')
-        except (OSError,ValueError,KeyError,TypeError,ToolError,asyncio.CancelledError):
+        except (Exception,asyncio.CancelledError):
+            # Fail closed: the owner is told the prior snapshot was retained.
             pass
         finally:
             for future in self.pending.values():
                 if not future.done(): future.set_exception(ToolError('Desktop session ended; an action may have run.'))
-            self.pending.clear();self.available.set();self.closed.set()
+            self.pending.clear();self.available.set()
+            _session_outcomes[self.context.run_id]=outcome
+            self.closed.set()
             from . import browser_network
             browser_network.revoke()
             self.writer.close()
@@ -318,8 +326,11 @@ async def end_session(run_id,graceful):
         else: session.writer.close()
         if not session.closed.is_set():
             try: await asyncio.wait_for(session.closed.wait(),3)
-            except TimeoutError: session.task.cancel()
+            except TimeoutError:
+                session.task.cancel()
+                await asyncio.gather(session.task,return_exceptions=True)
     _ended_sessions.discard(run_id)
+    return _session_outcomes.pop(run_id,None)
 
 
 async def request_container_kill():

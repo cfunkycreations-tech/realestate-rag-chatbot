@@ -1407,7 +1407,7 @@ def finish_run(job, status, kind, values=None, completion=None):
                     source=c.execute("SELECT content FROM messages WHERE id=? AND bot_id=? AND role='user'",(job['user_message_id'],bot_id)).fetchone()
                     if source: capture_memory(c,bot_id,job['user_message_id'],source['content'],time.time())
             warning=settle_round(c,job,bot_id,gateway,model,usage)
-            if warning: values['warning']=warning
+            if warning: values['warning']=' '.join(filter(None,(values.get('warning'),warning)))
         else:
             reservation_id=job.get('round_id',job['id'])
             changed=c.execute("UPDATE budget_reservations SET status=? WHERE run_id=? AND status='reserved'", ('uncertain' if job.get('dispatched') else 'released',reservation_id))
@@ -1549,7 +1549,12 @@ async def run_chat(job, bot, history, profile):
             complete_text+=content
             if not calls:
                 if 'id' in job:
-                    finish_run(job,'done','done',completion=(bot['id'],complete_text,entry['gateway'],entry['model'],usage))
+                    # Keep the run active until the session has closed and its
+                    # workspace snapshot has actually committed. A failed save
+                    # must not be silently reported as durable success.
+                    session_result=await computer.end_session(job['id'],True)
+                    warning={} if not session_result or session_result['saved'] else {'warning':'The computer workspace could not be saved. The previous workspace was retained; desktop actions may have run. Do not retry without review.'}
+                    finish_run(job,'done','done',warning,completion=(bot['id'],complete_text,entry['gateway'],entry['model'],usage))
                 else:
                     with db() as c:
                         c.execute('INSERT INTO messages VALUES (?,?,?,?,?)',(str(uuid.uuid4()),bot['id'],'assistant',complete_text,time.time()))

@@ -159,3 +159,64 @@ def test_desktop_screenshot_fits_safety_bound():
     encoded=service.desktop_image_for_model(img.getvalue(),5000)
     assert len(encoded)<=5000
     with pytest.raises(BudgetError): service.desktop_image_for_model(img.getvalue(),10)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('bad_snapshot',[False,True])
+async def test_session_close_reports_snapshot_commit_and_preserves_old_data(tmp_path,monkeypatch,bad_snapshot):
+    import asyncio
+    import base64
+    from funkbot import computer
+    from test_computer import make_context
+    import app as service
+    monkeypatch.setenv('FUNK_COMPUTER_ENABLED','1');monkeypatch.setenv('FUNK_COMPUTER_DESKTOP_ENABLED','1')
+    monkeypatch.setattr(computer,'SOCKET',str(tmp_path/'snapshot-session.sock'))
+    ctx,_=make_context(tmp_path)
+    previous={'dirs':[],'files':{'old.txt':{'data':base64.b64encode(b'old').decode(),'executable':False}}}
+    replacement={'dirs':[],'files':{'new.txt':{'data':base64.b64encode(b'new').decode(),'executable':False}}}
+    with service.db() as c: computer.persist_workspace(c,ctx.bot_id,previous)
+    async def server(reader,writer):
+        writer.write(b'{"ready":1}\n');await writer.drain();await reader.readline()
+        writer.write(b'{"session":"started"}\n');await writer.drain()
+        assert json.loads(await reader.readline())=={'type':'close'}
+        result={'session':'ended','reason':'closed','workspace':{'dirs':[],'files':{'../bad':{}}} if bad_snapshot else replacement}
+        writer.write(json.dumps(result).encode()+b'\n');await writer.drain();writer.close();await writer.wait_closed()
+    listener=await asyncio.start_unix_server(server,computer.SOCKET)
+    async with listener:
+        await computer.get_session(ctx,1)
+        outcome=await computer.end_session(ctx.run_id,True)
+    assert outcome['saved'] is not bad_snapshot
+    with service.db() as c: assert computer.read_workspace(c,ctx.bot_id)==(previous if bad_snapshot else replacement)
+    assert ctx.run_id not in computer._session_outcomes and not computer.active_info()
+
+
+def test_run_reports_computer_snapshot_failure_without_losing_usage(monkeypatch):
+    import io
+    from PIL import Image
+    import app as service
+    from funkbot import computer
+    from fastapi.testclient import TestClient
+    from test_app import FakeClient,setup
+    from test_live_tools import tool_reply,final_reply,until_calls,get_events
+    monkeypatch.setenv('FUNK_COMPUTER_ENABLED','1');monkeypatch.setenv('FUNK_COMPUTER_DESKTOP_ENABLED','1')
+    image=io.BytesIO();Image.new('RGB',(10,10),'white').save(image,format='PNG')
+    async def action(*_): return {},image.getvalue()
+    calls=[]
+    async def close(run_id,graceful):
+        calls.append(graceful)
+        return {'saved':False,'reason':'interrupted'} if len(calls)==1 else None
+    monkeypatch.setattr(computer,'desktop_action',action);monkeypatch.setattr(computer,'end_session',close)
+    FakeClient.responses=[tool_reply('computer_action',{'type':'screenshot'}),final_reply()]
+    monkeypatch.setattr(service.httpx,'AsyncClient',FakeClient)
+    with TestClient(service.app) as client:
+        setup(client);client.put('/api/budget/prices/vision',json={'prompt':'1','completion':'2','max_prompt_tokens':100000,'max_completion_tokens':512})
+        bot=client.post('/api/bots',json={'name':'Save','profile':'vision'}).json()['id']
+        client.put(f'/api/bots/{bot}/computer/permission',json={'allowed':True,'expected_revision':0})
+        run=client.post(f'/api/bots/{bot}/chat',json={'content':'View'}).json()['job_id'];call=until_calls(client,run)[0]
+        client.post(f'/api/jobs/{run}/tool-calls/{call["id"]}/decision',json={'decision':'approve_once'})
+        events=get_events(client,run)
+        assert events[-1]['type']=='done' and 'previous workspace was retained' in events[-1]['warning']
+        with service.db() as c:
+            rows=c.execute('SELECT status FROM budget_reservations WHERE parent_run_id=?',(run,)).fetchall()
+            assert len(rows)==2 and all(r['status']=='settled' for r in rows)
+    assert calls==[True,True]
