@@ -13,7 +13,7 @@ from urllib.parse import unquote, urlsplit
 from playwright.sync_api import sync_playwright
 
 WORKSPACE = Path('/workspace').resolve()
-MAX_TEXT = 16000
+MAX_TEXT = 4000
 
 
 def allowed_url(value):

@@ -148,3 +148,14 @@ def test_vision_action_is_individually_approved_and_screenshot_goes_to_model(mon
         assert captured[1]['messages'][-1]['content'][1]['image_url']['url'].startswith('data:image/jpeg;base64,')
         audit=client.get(f'/api/jobs/{run}/tool-calls').json()[0]
         assert audit['result']=={'ok':True} and 'base64' not in json.dumps(audit)
+
+
+def test_desktop_screenshot_fits_safety_bound():
+    import io
+    from PIL import Image
+    from funkbot.budget import BudgetError
+    import app as service
+    img=io.BytesIO();Image.effect_noise((1024,768),80).convert('RGB').save(img,format='PNG')
+    encoded=service.desktop_image_for_model(img.getvalue(),5000)
+    assert len(encoded)<=5000
+    with pytest.raises(BudgetError): service.desktop_image_for_model(img.getvalue(),10)

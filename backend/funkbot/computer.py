@@ -254,7 +254,7 @@ class DesktopSession:
                     self.domains[approved_host]=domain_revision
                 response=await self.request({'type':'action','action':action})
                 if 'frame' not in response: raise ToolError('Action may have run, but no screenshot was returned.')
-                result=response.get('result',{}) if response.get('ok') else {'error':str(response.get('error','Desktop action failed.'))[:1000]}
+                result=response.get('result',{}) if response.get('ok') else {'error':str(response.get('error','Desktop action failed.'))[:500]}
                 return result,_decode_frame(response['frame'])
 
     async def takeover(self,enabled):
