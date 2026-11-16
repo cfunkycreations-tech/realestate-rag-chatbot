@@ -364,13 +364,15 @@ def start_kill_switch():
     try:
         while True:
             conn,_=server.accept()
-            with conn:
-                conn.settimeout(2);data=b''
-                while len(data)<5:
-                    chunk=conn.recv(5-len(data))
-                    if not chunk: break
-                    data+=chunk
-                if data==b'kill\n': os.kill(1,signal.SIGUSR1)
+            try:
+                with conn:
+                    conn.settimeout(2);data=b''
+                    while len(data)<5:
+                        chunk=conn.recv(5-len(data))
+                        if not chunk: break
+                        data+=chunk
+                    if data==b'kill\n': os.kill(1,signal.SIGUSR1)
+            except OSError: continue
     except BaseException: os._exit(1)
 
 
