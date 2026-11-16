@@ -113,7 +113,7 @@ def receive():
         if set(msg)=={'frame'}: continue
         return msg
 def send(value): sock.sendall(json.dumps(value).encode()+b'\n')
-assert receive()=={'session':'started'}, 'Playwright Chromium did not start'
+_m=receive();assert _m=={'session':'started'}, 'Playwright Chromium did not start: '+str(_m)
 def action(identifier, body):
     send({'type':'action','id':identifier,'action':body})
     response=receive()

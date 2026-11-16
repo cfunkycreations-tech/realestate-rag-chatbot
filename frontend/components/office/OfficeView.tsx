@@ -8,7 +8,7 @@ import {demoEvents,desk,HEIGHT,obstacles,OfficeBot,OfficeCharacter,OfficeEvent,p
 const TILE=32;
 type Palette={floor:string;grid:string;room:string;gold:string;bright:string;panel:string;ink:string;muted:string;purple:string};
 function readPalette(element:HTMLElement):Palette{const css=getComputedStyle(element);const v=(name:string)=>css.getPropertyValue(name).trim();return {floor:v("--command-bg"),grid:v("--command-grid"),room:v("--command-room"),gold:v("--command-frame"),bright:v("--command-frame-bright"),panel:v("--command-panel-raised"),ink:v("--command-ink"),muted:v("--command-muted"),purple:v("--command-purple")}}
-const colors:Record<string,string>={lavender:'#c6b0ed',peach:'#f3b9a2',mint:'#a8d7bd',blue:'#a9c7e7',yellow:'#e8d59c'};
+const colors:Record<string,string>={lavender:'#3da5ff',peach:'#9ef7cd',mint:'#a8d7bd',blue:'#a9c7e7',yellow:'#8ef6c5'};
 const demoBots:OfficeBot[]=[
   {id:'demo-1',name:'Scout',title:'Demo researcher',color:'blue',shape:'round'},
   {id:'demo-2',name:'Milo',title:'Demo writer',color:'peach',shape:'round'},
@@ -41,14 +41,14 @@ function drawScene(ctx:CanvasRenderingContext2D,bots:OfficeBot[],characters:Offi
   ctx.save();ctx.shadowColor=palette.purple;ctx.shadowBlur=14;rounded(ctx,31*TILE,2*TILE,8*TILE,13*TILE,12,palette.room);ctx.restore();
   ctx.strokeStyle=palette.gold;ctx.lineWidth=3;ctx.beginPath();ctx.roundRect(31*TILE,2*TILE,8*TILE,13*TILE,12);ctx.stroke();
   rounded(ctx,33*TILE,5*TILE,4*TILE,4*TILE,12,palette.panel);ctx.strokeStyle=palette.gold;ctx.lineWidth=2;ctx.strokeRect(33*TILE+2,5*TILE+2,4*TILE-4,4*TILE-4);
-  ctx.fillStyle=palette.bright;ctx.font='bold 12px sans-serif';ctx.fillText('MEETING ROOM',31.5*TILE,3*TILE);
+  ctx.fillStyle=palette.bright;ctx.font='12px Audiowide, sans-serif';ctx.fillText('MEETING ROOM',31.5*TILE,3*TILE);
   const blocks=obstacles(0);ctx.fillStyle=palette.gold;for(const point of blocks){const [x,y]=point.split(',').map(Number);ctx.fillRect(x*TILE,y*TILE,4,TILE-1)}
-  ctx.fillStyle=palette.bright;ctx.font='bold 14px sans-serif';ctx.fillText('FUNK BOT  /  OFFICE',18,25);
+  ctx.fillStyle=palette.bright;ctx.font='14px Audiowide, sans-serif';ctx.fillText('FUNK BOT  /  OFFICE',18,25);
   bots.forEach((bot,index)=>{
     const p=desk(index),x=p.x*TILE,y=p.y*TILE;
     const glow=ctx.createRadialGradient(x,y,2,x,y,50);glow.addColorStop(0,palette.purple);glow.addColorStop(1,'transparent');ctx.save();ctx.globalAlpha=.23;ctx.fillStyle=glow;ctx.fillRect(x-50,y-50,100,100);ctx.restore();
     rounded(ctx,x-29,y+12,58,13,4,palette.panel);ctx.strokeStyle=palette.gold;ctx.lineWidth=1;ctx.strokeRect(x-29,y+12,58,13);
-    ctx.textAlign='center';ctx.fillStyle=palette.ink;ctx.font='bold 15px sans-serif';ctx.fillText(bot.name,x,y+41,92);ctx.fillStyle=palette.muted;ctx.font='13px sans-serif';ctx.fillText(jobTitle(bot),x,y+56,92);ctx.textAlign='start';
+    ctx.textAlign='center';ctx.fillStyle=palette.ink;ctx.font='15px Audiowide, sans-serif';ctx.fillText(bot.name,x,y+41,92);ctx.fillStyle=palette.muted;ctx.font='13px Orbitron Variable, sans-serif';ctx.fillText(jobTitle(bot),x,y+56,92);ctx.textAlign='start';
   });
   characters.forEach((character,index)=>{
     const point=positionAt(character.motion,now,reduced),x=point.x*TILE,y=point.y*TILE;
@@ -57,10 +57,10 @@ function drawScene(ctx:CanvasRenderingContext2D,bots:OfficeBot[],characters:Offi
     if(image?.complete&&image.naturalWidth){ctx.drawImage(image,x-40,y-64+bob,80,80)}
     else{rounded(ctx,x-30,y-54+bob,60,60,character.bot.shape==='square'?10:30,colors[character.bot.color]||colors.lavender);ctx.fillStyle=palette.floor;ctx.fillRect(x-10,y-34+bob,5,7);ctx.fillRect(x+5,y-34+bob,5,7)}
     if(character.state==='working'){ctx.fillStyle=palette.bright;ctx.beginPath();ctx.arc(x+29,y-43+bob,5,0,Math.PI*2);ctx.fill()}
-    if(character.state==='done'){ctx.fillStyle=palette.bright;ctx.font='bold 16px sans-serif';ctx.fillText('✓',x+27,y-38+bob)}
-    if(character.state==='error'){ctx.fillStyle='#f09cae';ctx.font='bold 16px sans-serif';ctx.fillText('!',x+27,y-38+bob)}
+    if(character.state==='done'){ctx.fillStyle=palette.bright;ctx.font='16px Audiowide, sans-serif';ctx.fillText('✓',x+27,y-38+bob)}
+    if(character.state==='error'){ctx.fillStyle='#3da5ff';ctx.font='16px Audiowide, sans-serif';ctx.fillText('!',x+27,y-38+bob)}
     if(character.bubble&&now-character.bubbleAt<7000&&now>=character.bubbleAt){
-      const text=character.bubble.slice(0,34)+(character.bubble.length>34?'…':'');ctx.font='11px sans-serif';const width=Math.min(240,Math.max(60,ctx.measureText(text).width+18));
+      const text=character.bubble.slice(0,34)+(character.bubble.length>34?'…':'');ctx.font='11px Orbitron Variable, sans-serif';const width=Math.min(240,Math.max(60,ctx.measureText(text).width+18));
       const bx=Math.max(1,Math.min(WIDTH*TILE-width-1,x-width/2)),by=Math.max(28,y-78);rounded(ctx,bx,by,width,22,6,palette.ink);ctx.fillStyle=palette.floor;ctx.fillText(text,bx+8,by+15);
     }
   });
