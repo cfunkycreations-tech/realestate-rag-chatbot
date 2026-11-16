@@ -346,3 +346,10 @@ input[type=file]::file-selector-button:hover{box-shadow:0 0 12px color-mix(in sr
  .hud-toggle{right:50px;top:12px}
 }
 @media(prefers-reduced-motion:reduce){.hud-needle,.hud-fill,.hud-bar-fill,.hud-instrument{transition:none}.hud-lamp.pulse{animation:none}}
+
+/* Character spotlight: a taller, wider window that scrolls instead of clipping the chat and computer workspace. */
+.spotlight-overlay{padding:12px}
+.spotlight-panel{width:min(1240px,100%);height:min(960px,98%);overflow-y:auto;overflow-x:hidden}
+.spotlight-panel>*{flex-shrink:0}
+.spotlight-panel>.spotlight-body{flex:1 0 auto;min-height:min(560px,70dvh)}
+@media(max-width:700px){.spotlight-overlay{padding:4px}.spotlight-panel{height:98%}.spotlight-panel>.spotlight-body{min-height:420px}}
