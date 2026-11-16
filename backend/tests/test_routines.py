@@ -114,18 +114,35 @@ def test_routine_approval_denial_and_global_pause(monkeypatch):
         assert len(FakeClient.responses)==1
 
 
-def test_repeated_work_suggests_owner_approved_routine():
+def test_repeated_similar_work_model_drafts_owner_approved_routine(monkeypatch):
+    import time
+    from test_groups_api import response
+    payloads=[]
+    class Recording(FakeClient):
+        def stream(self,*args,**kwargs): payloads.append(kwargs['json']);return super().stream(*args,**kwargs)
+    monkeypatch.setattr(service.httpx,'AsyncClient',Recording)
+    FakeClient.responses=[response('{"title":"Weekly report summary","instructions":"Read and summarize the report for the owner."}')]
     with TestClient(service.app) as c:
-        setup(c);bot=c.post('/api/bots',json={'name':'Observer'}).json()['id']
+        setup(c);configure_budget(c);bot=c.post('/api/bots',json={'name':'Observer'}).json()['id']
         with service.db() as db:
             from funkbot.learned_routines import discover
-            for i,text in enumerate(['Summarize the weekly report','  summarize  the weekly report  ']):
+            texts=['Summarize the weekly report for the owner','Summarize the weekly report for my team','Summarize the weekly report for the manager']
+            for i,text in enumerate(texts):
                 mid='learned-'+str(i)
-                db.execute('INSERT INTO missions VALUES (?,?,?,?,?,?,?,?,?)',(mid,'Weekly report',text,None,'done','Done',None,1+i,1+i))
+                db.execute('INSERT INTO missions VALUES (?,?,?,?,?,?,?,?,?)',(mid,'Weekly report',text,None,'done','Report summarized',None,1+i,1+i))
                 db.execute('INSERT INTO mission_assignees VALUES (?,?,?)',(mid,0,bot))
-            discover(db,10);discover(db,11)
-        suggestions=c.get('/api/routine-suggestions').json()
-        assert len(suggestions)==1 and suggestions[0]['examples']==2
+                if i==1:
+                    discover(db,10)
+                    assert db.execute('SELECT count(*) FROM routine_learning').fetchone()[0]==0
+            discover(db,11)
+        for _ in range(120):
+            suggestions=c.get('/api/routine-suggestions').json()
+            if suggestions: break
+            time.sleep(.1)
+        assert len(suggestions)==1 and suggestions[0]['examples']==3
+        assert suggestions[0]['instructions']=='Read and summarize the report for the owner.'
+        assert 'Report summarized' in payloads[0]['messages'][-1]['content'] and 'tools' not in payloads[0]
+        assert any(n['kind']=='routine_suggestion' for n in c.get('/api/inbox/notices').json())
         assert c.get('/api/routines').json()==[]
         body={'title':'Weekly report','instructions':'Summarize the weekly report','bot_id':bot,'cron':'0 9 * * 1','timezone':'UTC'}
         approved=c.post('/api/routine-suggestions/'+suggestions[0]['id']+'/approve',json=body)
