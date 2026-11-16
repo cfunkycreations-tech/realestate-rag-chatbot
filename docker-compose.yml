@@ -17,7 +17,9 @@ services:
     depends_on: [omniroute]
   computer:
     profiles: ["computer"]
-    build: ./computer
+    build:
+      context: .
+      dockerfile: computer/Dockerfile
     restart: always
     network_mode: none
     read_only: true

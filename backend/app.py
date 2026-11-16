@@ -47,7 +47,7 @@ from alembic.script import ScriptDirectory
 from funkbot.vault import MAX_ARCHIVE, VaultError, character_for_bot, draw_character, import_zip
 from funkbot.budget import BudgetError, NANOS_PER_DOLLAR, dollars_to_nanos, limit_to_nanos, limits_for, reconcile_run, reconcile_usage, reserve, reserve_followup, settle, token_cost_nanos
 from funkbot.tool_policy import WebPolicy
-from funkbot import computer
+from funkbot import computer, computer_snapshot
 from funkbot.tools import ToolError, McpCallArgs
 from funkbot import mcp_http, tools
 from funkbot.tool_audit import abort as abort_tool
@@ -553,6 +553,76 @@ def delete_bot(bot_id: str, request: Request):
         if assignment and not c.execute('SELECT 1 FROM bot_characters WHERE character_id=?',(assignment['character_id'],)).fetchone():
             c.execute('UPDATE characters SET drawn=0 WHERE id=?',(assignment['character_id'],))
     return {'ok':True}
+
+def computer_bot_exists(c,bot_id):
+    if not c.execute('SELECT 1 FROM bots WHERE id=?',(bot_id,)).fetchone(): raise HTTPException(404,'Bot not found.')
+
+
+def computer_not_busy(c,bot_id):
+    if c.execute("SELECT 1 FROM runs WHERE bot_id=? AND status IN ('queued','running','waiting_approval')",(bot_id,)).fetchone():
+        raise HTTPException(409,'Stop or finish this Bot’s active response first.')
+
+
+def computer_workspace(c,bot_id):
+    try: return computer.read_workspace(c,bot_id)
+    except ToolError as exc: raise HTTPException(400,str(exc)) from exc
+
+
+@app.get('/api/bots/{bot_id}/computer/files')
+def list_computer_files(bot_id: str,request: Request):
+    require_auth(request)
+    with db() as c:
+        computer_bot_exists(c,bot_id);workspace=computer_workspace(c,bot_id)
+        return [{'path':path,'size':len(base64.b64decode(item['data'])),'executable':item['executable']} for path,item in sorted(workspace['files'].items())]
+
+
+@app.get('/api/bots/{bot_id}/computer/download')
+def download_computer_file(bot_id: str,request: Request,path: str = Query(min_length=1,max_length=500)):
+    require_auth(request)
+    with db() as c:
+        computer_bot_exists(c,bot_id);entry=computer_workspace(c,bot_id)['files'].get(path)
+        if not entry: raise HTTPException(404,'Computer file not found.')
+        data=base64.b64decode(entry['data'])
+    return Response(content=data,media_type='application/octet-stream',headers={'Content-Disposition':"attachment; filename*=UTF-8''"+quote(path.split('/')[-1],safe=''),'Cache-Control':'private, no-store','X-Content-Type-Options':'nosniff','Content-Security-Policy':"default-src 'none'; sandbox"})
+
+
+@app.post('/api/bots/{bot_id}/computer/files')
+async def upload_computer_file(bot_id: str,request: Request,file: UploadFile=File(...)):
+    require_auth(request);name=file.filename or ''
+    if not computer_snapshot.valid_path(name) or '/' in name: raise HTTPException(400,'Use a simple ASCII filename of at most 100 characters, without directories.')
+    data=await file.read(computer_snapshot.MAX_FILE+1)
+    if len(data)>computer_snapshot.MAX_FILE: raise HTTPException(400,'Computer files are limited to 512 KiB.')
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE');computer_bot_exists(c,bot_id);computer_not_busy(c,bot_id)
+        workspace=computer_workspace(c,bot_id)
+        if name in workspace['files'] or name in workspace['dirs']: raise HTTPException(409,'That workspace entry already exists.')
+        workspace['files'][name]={'data':base64.b64encode(data).decode(),'executable':False}
+        try: computer.persist_workspace(c,bot_id,workspace)
+        except ToolError as exc: raise HTTPException(400,str(exc)) from exc
+    return {'path':name,'size':len(data)}
+
+
+@app.delete('/api/bots/{bot_id}/computer/files')
+def delete_computer_file(bot_id: str,request: Request,path: str = Query(min_length=1,max_length=500)):
+    require_auth(request)
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE');computer_bot_exists(c,bot_id);computer_not_busy(c,bot_id)
+        workspace=computer_workspace(c,bot_id)
+        if path not in workspace['files']: raise HTTPException(404,'Computer file not found.')
+        del workspace['files'][path]
+        try: computer.persist_workspace(c,bot_id,workspace)
+        except ToolError as exc: raise HTTPException(400,str(exc)) from exc
+    return {'ok':True}
+
+
+@app.delete('/api/bots/{bot_id}/computer/workspace')
+def reset_computer_workspace(bot_id: str,request: Request):
+    require_auth(request)
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE');computer_bot_exists(c,bot_id);computer_not_busy(c,bot_id)
+        c.execute('DELETE FROM computer_workspaces WHERE bot_id=?',(bot_id,))
+    return {'ok':True}
+
 
 @app.get('/api/bots/{bot_id}/avatar')
 def bot_avatar(bot_id: str, request: Request):

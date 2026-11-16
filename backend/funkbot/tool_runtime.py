@@ -148,7 +148,7 @@ async def execute(context: ToolContext, name: str, args: dict, wait_decision):
         safe_args=json.loads(row['arguments'])
         try:
             if name=='computer_shell':
-                result=await computer.execute(tools.ComputerArgs.model_validate(safe_args).command)
+                result=await computer.execute(context,tools.ComputerArgs.model_validate(safe_args).command)
             elif name=='mcp_call':
                 if not context.connector_call: raise tools.ToolError('Connector execution is unavailable.')
                 result=await context.connector_call(connector,tools.McpCallArgs.model_validate(safe_args))

@@ -1,0 +1,12 @@
+# The root build context is used only for the computer worker. Never send app
+# data, credentials, Git history or dependencies to the Docker build context.
+*
+!computer/
+computer/*
+!computer/Dockerfile
+!computer/worker.py
+!backend/
+backend/*
+!backend/funkbot/
+backend/funkbot/*
+!backend/funkbot/computer_snapshot.py
