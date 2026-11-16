@@ -7,7 +7,7 @@ from datetime import datetime
 from dataclasses import dataclass, field
 from typing import Callable
 
-from . import tool_audit, tools
+from . import tool_audit, tools, computer
 
 
 @dataclass
@@ -55,6 +55,7 @@ async def execute(context: ToolContext, name: str, args: dict, wait_decision):
         if not spec: raise tools.ToolError('Unknown tool.')
         policy=context.policy_for(c,name,spec.risk)
         connector=None
+        if name=='computer_shell' and not computer.enabled(): policy='deny'
         if name=='mcp_call':
             parsed=tools.McpCallArgs.model_validate(args)
             try: arguments=json.loads(parsed.arguments_json)
@@ -100,7 +101,7 @@ async def execute(context: ToolContext, name: str, args: dict, wait_decision):
             context.notify({'type':'tool.decision','call_id':call,'decision':'policy_denied','status':'denied'})
             return {'status':'denied','message':'The owner tool policy denied this call.'}
         if row['status']=='pending':
-            granted=name not in ('mcp_call','create_handoff','attach_mission_result','read_work_file','web_search') and name in context.run_grants
+            granted=name not in ('mcp_call','create_handoff','attach_mission_result','read_work_file','web_search','computer_shell') and name in context.run_grants
             decision='run_grant' if granted else await wait_decision(call)
             with context.db() as c:
                 c.execute('BEGIN IMMEDIATE');live(c,context)
@@ -110,12 +111,13 @@ async def execute(context: ToolContext, name: str, args: dict, wait_decision):
                     tool_audit.approve_from_run_grant(c,call);status='approved'
                 else:
                     status=tool_audit.decide(c,call,decision)
-            if not granted and decision=='approve' and name not in ('mcp_call','create_handoff','attach_mission_result','read_work_file','web_search'): context.run_grants.add(name)
+            if not granted and decision=='approve' and name not in ('mcp_call','create_handoff','attach_mission_result','read_work_file','web_search','computer_shell'): context.run_grants.add(name)
             context.notify({'type':'tool.decision','call_id':call,'decision':decision,'status':status})
             if status=='denied': return {'status':'denied','message':'The owner denied this tool call.'}
         with context.db() as c:
             c.execute('BEGIN IMMEDIATE');live(c,context)
             current=context.policy_for(c,name,row['risk'])
+            if name=='computer_shell' and not computer.enabled(): current='deny'
             if name=='mcp_call':
                 reviewed=json.loads(row['arguments']);latest=context.connector_info(c,reviewed['connector_id'])
                 if not latest or not latest.get('enabled') or reviewed['tool_name'] not in latest.get('allowed_tools',[]) or latest.get('revision')!=reviewed['connector_revision'] or latest.get('url')!=reviewed['endpoint']: current='deny'
@@ -145,7 +147,9 @@ async def execute(context: ToolContext, name: str, args: dict, wait_decision):
             return {'status':'denied','message':'Tool policy changed before execution.'}
         safe_args=json.loads(row['arguments'])
         try:
-            if name=='mcp_call':
+            if name=='computer_shell':
+                result=await computer.execute(tools.ComputerArgs.model_validate(safe_args).command)
+            elif name=='mcp_call':
                 if not context.connector_call: raise tools.ToolError('Connector execution is unavailable.')
                 result=await context.connector_call(connector,tools.McpCallArgs.model_validate(safe_args))
             elif name=='read_work_file':

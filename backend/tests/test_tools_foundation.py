@@ -10,8 +10,8 @@ from pydantic import ValidationError
 from funkbot import tools
 
 
-def test_registry_is_typed_and_has_no_shell():
-    assert set(tools.REGISTRY)=={'web_fetch','write_note','create_followup','mcp_call','create_handoff','attach_mission_result','read_work_file','web_search'}
+def test_registry_is_typed():
+    assert set(tools.REGISTRY)=={'web_fetch','write_note','create_followup','mcp_call','create_handoff','attach_mission_result','read_work_file','web_search','computer_shell'}
     assert tools.REGISTRY['web_fetch'].risk=='read'
     assert tools.REGISTRY['write_note'].risk=='write'
     with pytest.raises(ValidationError): tools.WebFetchArgs(url='https://example.com',extra='not allowed')

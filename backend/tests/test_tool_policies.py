@@ -8,7 +8,7 @@ from test_live_tools import tool_reply,final_reply,until_calls,get_events
 def test_tool_policy_configuration_and_write_auto_forbidden():
     with TestClient(service.app) as c:
         assert c.get('/api/settings/tool-policies').status_code==401
-        setup(c);assert c.get('/api/settings/tool-policies').json()=={'web_fetch':'auto','write_note':'ask','create_followup':'ask','create_handoff':'ask','attach_mission_result':'ask','read_work_file':'ask','web_search':'ask'}
+        setup(c);assert c.get('/api/settings/tool-policies').json()=={'web_fetch':'auto','write_note':'ask','create_followup':'ask','create_handoff':'ask','attach_mission_result':'ask','read_work_file':'ask','web_search':'ask','computer_shell':'ask'}
         assert c.put('/api/settings/tool-policies',json={'web_fetch':'auto','write_note':'auto','create_followup':'ask'}).status_code==422
         assert c.put('/api/settings/tool-policies',json={'web_fetch':'ask','write_note':'deny','create_followup':'ask'}).status_code==200
         assert c.get('/api/settings/tool-policies').json()['write_note']=='deny'

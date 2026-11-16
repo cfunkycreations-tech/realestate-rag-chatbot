@@ -7,17 +7,36 @@ services:
     depends_on: [backend]
   backend:
     build: ./backend
-    volumes: ["funk_data:/data"]
+    volumes: ["funk_data:/data", "computer_control:/computer-control"]
     environment:
       FUNK_DATA_DIR: ${FUNK_DATA_DIR:-/data}
       OMNIROUTE_URL: http://omniroute:20128/v1
       FUNK_SESSION_SECRET: ${FUNK_SESSION_SECRET:-}
       FUNK_ENABLE_RESTORE_RESTART: "1"
+      FUNK_COMPUTER_ENABLED: ${FUNK_COMPUTER_ENABLED:-0}
     depends_on: [omniroute]
+  computer:
+    profiles: ["computer"]
+    build: ./computer
+    restart: always
+    network_mode: none
+    read_only: true
+    init: false
+    cap_drop: [ALL]
+    cap_add: [SETUID, SETGID, KILL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 64
+    mem_limit: 256m
+    cpus: 1.0
+    tmpfs:
+      - /tmp:size=16m,mode=1777,nosuid,nodev
+      - /workspace:size=128m,mode=1777,nosuid,nodev
+    volumes: ["computer_control:/control"]
   omniroute:
     image: diegosouzapw/omniroute:latest
     volumes: ["omniroute_data:/app/data"]
     ports: ["127.0.0.1:20128:20128"]
 volumes:
+  computer_control:
   funk_data:
   omniroute_data:

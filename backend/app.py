@@ -47,6 +47,7 @@ from alembic.script import ScriptDirectory
 from funkbot.vault import MAX_ARCHIVE, VaultError, character_for_bot, draw_character, import_zip
 from funkbot.budget import BudgetError, NANOS_PER_DOLLAR, dollars_to_nanos, limit_to_nanos, limits_for, reconcile_run, reconcile_usage, reserve, reserve_followup, settle, token_cost_nanos
 from funkbot.tool_policy import WebPolicy
+from funkbot import computer
 from funkbot.tools import ToolError, McpCallArgs
 from funkbot import mcp_http, tools
 from funkbot.tool_audit import abort as abort_tool
@@ -930,6 +931,7 @@ class ToolPoliciesIn(BaseModel):
     attach_mission_result: Literal['ask','deny'] | None = None
     read_work_file: Literal['ask','deny'] | None = None
     web_search: Literal['ask','deny'] | None = None
+    computer_shell: Literal['ask','deny'] | None = None
 
 
 def tool_policy_for(c,name,risk):
@@ -940,10 +942,16 @@ def tool_policy_for(c,name,risk):
     return value if value in ('auto','ask','deny') and not (value=='auto' and risk!='read') else 'deny'
 
 
+@app.get('/api/settings/computer')
+def get_computer_status(request: Request):
+    require_auth(request)
+    return {'enabled':computer.enabled()}
+
+
 @app.get('/api/settings/tool-policies')
 def get_tool_policies(request: Request):
     require_auth(request)
-    with db() as c: return {name:tool_policy_for(c,name,risk) for name,risk in [('web_fetch','read'),('write_note','write'),('create_followup','write'),('create_handoff','send'),('attach_mission_result','write'),('read_work_file','send'),('web_search','send')]}
+    with db() as c: return {name:tool_policy_for(c,name,risk) for name,risk in [('web_fetch','read'),('write_note','write'),('create_followup','write'),('create_handoff','send'),('attach_mission_result','write'),('read_work_file','send'),('web_search','send'),('computer_shell','write')]}
 
 
 @app.put('/api/settings/tool-policies')
@@ -952,7 +960,7 @@ def put_tool_policies(body: ToolPoliciesIn,request: Request):
     with db() as c:
         c.execute('BEGIN IMMEDIATE')
         values=body.model_dump()
-        for name,risk in [('create_handoff','send'),('attach_mission_result','write'),('read_work_file','send'),('web_search','send')]:
+        for name,risk in [('create_handoff','send'),('attach_mission_result','write'),('read_work_file','send'),('web_search','send'),('computer_shell','write')]:
             if values[name] is None: values[name]=tool_policy_for(c,name,risk)
         c.execute("INSERT OR REPLACE INTO config VALUES ('tool_policies',?)",(json.dumps(values),))
     return values
@@ -1288,7 +1296,7 @@ def prompt_bound(messages, tool_definitions):
 
 def tool_event(job, item):
     kind=item['type']; values={key:value for key,value in item.items() if key!='type'}
-    requires_decision=(kind=='tool.proposed' and item['status']=='pending' and (item['tool'] in ('mcp_call','create_handoff','attach_mission_result','read_work_file','web_search') or item['tool'] not in job['tool_bridge'].context.run_grants))
+    requires_decision=(kind=='tool.proposed' and item['status']=='pending' and (item['tool'] in ('mcp_call','create_handoff','attach_mission_result','read_work_file','web_search','computer_shell') or item['tool'] not in job['tool_bridge'].context.run_grants))
     if kind=='tool.proposed': values['needs_decision']=requires_decision
     with db() as c:
         c.execute('BEGIN IMMEDIATE')
@@ -1307,7 +1315,7 @@ def tool_event(job, item):
 async def run_chat(job, bot, history, profile):
     entries=job.get('entries') or json.loads(config('profiles')).get(profile,[])
     messages=[{'role':'system','content':bot_system_prompt(bot)},*history]
-    tool_definitions=declarations(bool(bot.get('connector_catalog')),bool(bot.get('handoff_catalog')),bool(job.get('mission_id')),bool(bot.get('search_enabled'))) if 'id' in job and not job.get('lab_step_id') else []
+    tool_definitions=declarations(bool(bot.get('connector_catalog')),bool(bot.get('handoff_catalog')),bool(job.get('mission_id')),bool(bot.get('search_enabled')),computer.enabled()) if 'id' in job and not job.get('lab_step_id') else []
     complete_text=''
     try:
         for round_number in range(5):
@@ -1498,7 +1506,7 @@ async def start_chat(bot_id: str, body: ChatIn, mission_id: str | None = None, g
         if price:
             # Conservative byte estimate with protocol overhead, not a guarantee
             # for unknown tokenizers or gateways that add unreported tokens.
-            bound = prompt_bound([{'role':'system','content':bot_system_prompt(bot)},*history],[] if lab_step_id else declarations(bool(bot.get('connector_catalog')),bool(bot.get('handoff_catalog')),bool(mission_id),bool(bot.get('search_enabled'))))
+            bound = prompt_bound([{'role':'system','content':bot_system_prompt(bot)},*history],[] if lab_step_id else declarations(bool(bot.get('connector_catalog')),bool(bot.get('handoff_catalog')),bool(mission_id),bool(bot.get('search_enabled')),computer.enabled()))
             if bound > price['max_prompt_tokens']:
                 raise HTTPException(400, 'Message and conversation exceed the configured prompt token safety bound for this profile.')
         try:
@@ -3337,7 +3345,7 @@ async def decide_tool_call(job_id: str, call_id: str, body: ToolDecisionIn, requ
         require_unpaused(c)
         row=c.execute('SELECT tool_calls.status,tool_calls.tool_name, runs.status AS run_status FROM tool_calls JOIN runs ON runs.id=tool_calls.run_id WHERE tool_calls.id=? AND tool_calls.run_id=?',(call_id,job_id)).fetchone()
     if not row: raise HTTPException(404,'Tool call not found.')
-    if row['tool_name'] in ('mcp_call','create_handoff','attach_mission_result','read_work_file','web_search') and body.decision=='approve': raise HTTPException(400,'Connector calls, searches, handoffs and mission file actions must be approved individually.')
+    if row['tool_name'] in ('mcp_call','create_handoff','attach_mission_result','read_work_file','web_search','computer_shell') and body.decision=='approve': raise HTTPException(400,'Computer commands, connector calls, searches, handoffs and mission file actions must be approved individually.')
     bridge=jobs.get(job_id,{}).get('tool_bridge')
     if row['status']!='pending' or row['run_status'] not in ACTIVE_STATUSES or bridge is None:
         raise HTTPException(409,'This approval is no longer pending.')
