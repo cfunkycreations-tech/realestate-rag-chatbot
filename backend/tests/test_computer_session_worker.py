@@ -270,3 +270,29 @@ async def test_observation_keeps_capture_revision_when_owner_takes_over_after_ac
     assert ctx.desktop_observation_revision==0
     result=await execute(ctx,'computer_action',{'type':'click','x':1,'y':2},approve)
     assert result['status']=='denied' and 'screenshot' in result['message']
+
+
+def test_real_playwright_browser_actions_when_configured(tmp_path,monkeypatch):
+    """Optional real Chromium smoke; this is not a Docker isolation test."""
+    import os
+    import importlib.util
+    from pathlib import Path
+    executable=os.environ.get('COMPUTER_TEST_CHROMIUM')
+    if not executable or not Path(executable).is_file(): pytest.skip('Set COMPUTER_TEST_CHROMIUM to a local Chromium executable.')
+    sync_api=pytest.importorskip('playwright.sync_api')
+    spec=importlib.util.spec_from_file_location('real_session_browser',ROOT/'computer'/'session_browser.py')
+    browser_module=importlib.util.module_from_spec(spec);spec.loader.exec_module(browser_module)
+    monkeypatch.setattr(browser_module,'WORKSPACE',tmp_path.resolve())
+    fixture=tmp_path/'fixture.html'
+    fixture.write_text('''<!doctype html><input id="name"><button id="go" onclick="document.querySelector('#result').textContent=document.querySelector('#name').value">Go</button><p id="result"></p>''')
+    with sync_api.sync_playwright() as playwright:
+        browser=playwright.chromium.launch(executable_path=executable,headless=True,args=['--no-sandbox','--disable-dev-shm-usage'])
+        try:
+            page=browser.new_page()
+            browser_module.perform(page,{'type':'open_url','url':fixture.as_uri()})
+            browser_module.perform(page,{'type':'fill','selector':'#name','text':'real Playwright fixture'})
+            browser_module.perform(page,{'type':'click_selector','selector':'#go'})
+            assert 'real Playwright fixture' in browser_module.perform(page,{'type':'extract_text'})['text']
+            browser_module.perform(page,{'type':'screenshot'})
+            assert page.screenshot().startswith(b'\x89PNG\r\n\x1a\n')
+        finally: browser.close()
