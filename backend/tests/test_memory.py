@@ -177,3 +177,23 @@ def test_chat_forget_never_deletes_ambiguous_memory():
         c.post(f'/api/bots/{bot}/memory',json={'content':'Duplicate fact.'})
         assert c.post(f'/api/bots/{bot}/chat',json={'content':'!memory forget duplicate fact'}).status_code==409
         assert len(c.get(f'/api/bots/{bot}/memory').json())==2
+
+
+def test_model_learns_chat_fact_and_owner_can_review_edit_delete(monkeypatch):
+    from test_live_tools import tool_reply
+    monkeypatch.setattr(service.httpx,'AsyncClient',FakeClient)
+    FakeClient.responses=[tool_reply('remember_fact',{'fact':'The owner lives in Austin.'}),final_reply()]
+    with TestClient(service.app) as c:
+        setup(c);configure_budget(c)
+        bot=c.post('/api/bots',json={'name':'Learner'}).json()['id']
+        other=c.post('/api/bots',json={'name':'Other'}).json()['id']
+        run=c.post(f'/api/bots/{bot}/chat',json={'content':'I live in Austin.'}).json()['job_id']
+        assert '"type": "done"' in c.get(f'/api/jobs/{run}/events').text
+        memories=c.get(f'/api/bots/{bot}/memory').json()
+        assert len(memories)==1 and memories[0]['content']=='The owner lives in Austin.' and memories[0]['source']=='learned_chat'
+        assert c.get(f'/api/bots/{other}/memory').json()==[]
+        mid=memories[0]['id']
+        assert c.put(f'/api/bots/{bot}/memory/{mid}',json={'content':'The owner lives in Texas.','pinned':True}).status_code==200
+        assert c.get(f'/api/bots/{bot}/memory').json()[0]['content']=='The owner lives in Texas.'
+        assert c.delete(f'/api/bots/{bot}/memory/{mid}').status_code==200
+        assert c.get(f'/api/bots/{bot}/memory').json()==[]

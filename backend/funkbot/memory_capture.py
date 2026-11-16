@@ -74,3 +74,14 @@ def parse_command(text):
     if not old or not normalized(old) or len(old) > 4000 or (new is not None and (not new or not normalized(new) or len(new) > 4000)):
         raise ValueError('Memory text must be between 1 and 4,000 characters.')
     return (action, old, new)
+
+
+def save_learned(c, bot_id, message_id, facts, now):
+    rows=c.execute('SELECT content FROM bot_memories WHERE bot_id=?',(bot_id,)).fetchall()
+    existing={normalized(row['content']) for row in rows}
+    count=len(rows);size=sum(len(row['content']) for row in rows)
+    for fact in facts:
+        text=fact.strip();key=normalized(text)
+        if not key or key in existing or '[redacted]' in text.casefold() or count>=50 or size+len(text)>32000: continue
+        c.execute("INSERT INTO bot_memories (id,bot_id,content,pinned,created_at,updated_at,source,source_ref) VALUES (?,?,?,0,?,?,?,?)",(str(uuid.uuid4()),bot_id,text,now,now,'learned_chat',message_id))
+        existing.add(key);count+=1;size+=len(text)

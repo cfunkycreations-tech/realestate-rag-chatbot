@@ -36,6 +36,8 @@ class ToolContext:
     approved_destinations: list | None = None
     vision: bool = False
     desktop_observation_revision: int | None = None
+    memory_source: str | None = None
+    learned_facts: list = field(default_factory=list)
 
 
 def live(c, context):
@@ -58,6 +60,7 @@ async def execute(context: ToolContext, name: str, args: dict, wait_decision):
         policy=context.policy_for(c,name,spec.risk)
         connector=None
         desktop_stale=False
+        if name=='remember_fact': policy='auto' if context.memory_source else 'deny'
         if name in ('computer_shell','computer_action'):
             parsed=(tools.ComputerArgs if name=='computer_shell' else tools.ComputerActionArgs).model_validate(args)
             grant=computer.permission(c,context.bot_id)
@@ -136,6 +139,7 @@ async def execute(context: ToolContext, name: str, args: dict, wait_decision):
         with context.db() as c:
             c.execute('BEGIN IMMEDIATE');live(c,context)
             current=context.policy_for(c,name,row['risk'])
+            if name=='remember_fact': current='auto' if context.memory_source else 'deny'
             if name in ('computer_shell','computer_action'):
                 grant=computer.permission(c,context.bot_id);reviewed=json.loads(row['arguments'])
                 if not computer.enabled() or not grant['allowed'] or grant['revision']!=reviewed['permission_revision'] or context.policy_for(c,'computer_shell','write')=='deny' or (name=='computer_action' and (not computer.desktop_enabled() or not context.vision)): current='deny'
@@ -175,7 +179,13 @@ async def execute(context: ToolContext, name: str, args: dict, wait_decision):
         safe_args=json.loads(row['arguments'])
         screenshot=None
         try:
-            if name=='computer_action':
+            if name=='remember_fact':
+                fact=tools.LearnedMemoryArgs.model_validate(safe_args).fact.strip()
+                if not fact or '[redacted]' in fact.casefold(): raise tools.ToolError('Cannot remember empty or redacted facts.')
+                if len(context.learned_facts)>=5: raise tools.ToolError('Memory extraction limit reached for this response.')
+                context.learned_facts.append(fact)
+                result={'staged':True,'message':'This fact will be saved for owner review if the response completes.'}
+            elif name=='computer_action':
                 body=tools.ReviewedComputerActionArgs.model_validate(safe_args)
                 action=body.model_dump(exclude_none=True,exclude={'permission_revision','approved_host','domain_revision','control_revision'})
                 result,screenshot=await computer.desktop_action(context,body.permission_revision,action,body.approved_host,body.domain_revision,body.control_revision)
