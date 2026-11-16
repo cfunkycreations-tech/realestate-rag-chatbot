@@ -32,6 +32,7 @@ class ToolContext:
     artifact_review: Callable = None
     gateway_entries: list = field(default_factory=list)
     destination_snapshot: Callable = None
+    search_info: Callable = lambda c: None
     approved_destinations: list | None = None
 
 
@@ -63,6 +64,11 @@ async def execute(context: ToolContext, name: str, args: dict, wait_decision):
             connector=context.connector_info(c,parsed.connector_id)
             args={**parsed.model_dump(),'arguments_json':json.dumps(arguments,ensure_ascii=False),'endpoint':connector['url'] if connector else '', 'connector_revision':connector['revision'] if connector else ''}
             if not connector or not connector.get('enabled') or parsed.tool_name not in connector.get('allowed_tools',[]): policy='deny'
+        if name=='web_search':
+            parsed=tools.WebSearchArgs.model_validate(args)
+            endpoint=context.search_info(c)
+            args={'query':parsed.query.strip(),'endpoint':endpoint or ''}
+            if not endpoint or not parsed.query.strip(): policy='deny'
         if name=='read_work_file':
             parsed=tools.ReadWorkFileArgs.model_validate(args)
             try:
@@ -94,7 +100,7 @@ async def execute(context: ToolContext, name: str, args: dict, wait_decision):
             context.notify({'type':'tool.decision','call_id':call,'decision':'policy_denied','status':'denied'})
             return {'status':'denied','message':'The owner tool policy denied this call.'}
         if row['status']=='pending':
-            granted=name not in ('mcp_call','create_handoff','attach_mission_result','read_work_file') and name in context.run_grants
+            granted=name not in ('mcp_call','create_handoff','attach_mission_result','read_work_file','web_search') and name in context.run_grants
             decision='run_grant' if granted else await wait_decision(call)
             with context.db() as c:
                 c.execute('BEGIN IMMEDIATE');live(c,context)
@@ -104,7 +110,7 @@ async def execute(context: ToolContext, name: str, args: dict, wait_decision):
                     tool_audit.approve_from_run_grant(c,call);status='approved'
                 else:
                     status=tool_audit.decide(c,call,decision)
-            if not granted and decision=='approve' and name not in ('mcp_call','create_handoff','attach_mission_result','read_work_file'): context.run_grants.add(name)
+            if not granted and decision=='approve' and name not in ('mcp_call','create_handoff','attach_mission_result','read_work_file','web_search'): context.run_grants.add(name)
             context.notify({'type':'tool.decision','call_id':call,'decision':decision,'status':status})
             if status=='denied': return {'status':'denied','message':'The owner denied this tool call.'}
         with context.db() as c:
@@ -114,6 +120,9 @@ async def execute(context: ToolContext, name: str, args: dict, wait_decision):
                 reviewed=json.loads(row['arguments']);latest=context.connector_info(c,reviewed['connector_id'])
                 if not latest or not latest.get('enabled') or reviewed['tool_name'] not in latest.get('allowed_tools',[]) or latest.get('revision')!=reviewed['connector_revision'] or latest.get('url')!=reviewed['endpoint']: current='deny'
                 connector=latest
+            if name=='web_search':
+                reviewed=json.loads(row['arguments']);endpoint=context.search_info(c)
+                if not endpoint or endpoint!=reviewed['endpoint']: current='deny'
             if name=='read_work_file':
                 reviewed=tools.ReadWorkFileArgs.model_validate_json(row['arguments'])
                 try:
@@ -147,6 +156,8 @@ async def execute(context: ToolContext, name: str, args: dict, wait_decision):
             elif name=='create_handoff':
                 if not context.handoff_call: raise tools.ToolError('Handoffs are unavailable.')
                 result=await context.handoff_call(context,tools.HandoffArgs.model_validate(safe_args))
+            elif name=='web_search':
+                result=await tools.web_search(tools.WebSearchArgs.model_validate(safe_args),context.allow,context.deny)
             elif name=='web_fetch': result=await tools.web_fetch(tools.WebFetchArgs.model_validate(safe_args),context.allow,context.deny)
             elif name=='write_note': result=tools.write_note(context.data_dir,context.bot_id,tools.NotesArgs.model_validate(safe_args))
             elif name=='create_followup':
