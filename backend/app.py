@@ -2475,7 +2475,7 @@ def routine_mission(c, row, scheduled_at, now):
     mission_id=str(uuid.uuid4())
     c.execute('INSERT INTO missions VALUES (?,?,?,?,?,?,?,?,?)',(mission_id,row['title'],row['instructions'],None,'queued',None,None,now,now))
     c.execute('INSERT INTO mission_assignees VALUES (?,?,?)',(mission_id,0,row['bot_id']))
-    c.execute('INSERT INTO routine_runs VALUES (?,?,?,?,?,?)',(str(uuid.uuid4()),row['id'],mission_id,scheduled_at,now,'pending'))
+    c.execute('INSERT INTO routine_runs (id,routine_id,mission_id,scheduled_at,created_at,approval) VALUES (?,?,?,?,?,?)',(str(uuid.uuid4()),row['id'],mission_id,scheduled_at,now,'approved' if scheduled_at is not None else 'pending'))
     return mission_id
 
 
@@ -2499,6 +2499,19 @@ async def routine_tick(now=None):
                 c.execute('UPDATE routines SET paused=1,updated_at=? WHERE id=?',(now,row['id']));continue
             routine_mission(c,row,row['next_at'],now);outstanding+=1
             c.execute('UPDATE routines SET next_at=?,updated_at=? WHERE id=?',(next_at,now,row['id']))
+        # An approved occurrence is retried at most once. The same mission
+        # keeps both attempt logs; each new model round is budgeted normally.
+        failures=c.execute("""SELECT rr.id,rr.mission_id,rr.retry_count,rr.failure_notified,m.error,m.title,ma.bot_id
+            FROM routine_runs rr JOIN missions m ON m.id=rr.mission_id
+            LEFT JOIN mission_assignees ma ON ma.mission_id=m.id AND ma.position=0
+            WHERE rr.approval='approved' AND m.status='failed'""").fetchall()
+        for failure in failures:
+            if failure['retry_count']==0:
+                c.execute('UPDATE routine_runs SET retry_count=1 WHERE id=?',(failure['id'],))
+                c.execute("UPDATE missions SET status='queued',error=NULL,updated_at=? WHERE id=? AND status='failed'",(now,failure['mission_id']))
+            elif not failure['failure_notified']:
+                inbox.add(c,failure['bot_id'],'routine','Routine failed: '+failure['title'],failure['error'] or 'Routine failed after retry.',mission_id=failure['mission_id'])
+                c.execute('UPDATE routine_runs SET failure_notified=1 WHERE id=?',(failure['id'],))
         queued=[r['mission_id'] for r in c.execute("SELECT routine_runs.mission_id FROM routine_runs JOIN missions ON missions.id=routine_runs.mission_id WHERE missions.status='queued' AND routine_runs.approval='approved' ORDER BY routine_runs.created_at LIMIT 20")]
     for mission_id in queued:
         if mission_id not in mission_tasks: schedule_mission(mission_id)

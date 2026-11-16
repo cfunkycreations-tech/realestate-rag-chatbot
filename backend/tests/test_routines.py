@@ -157,3 +157,33 @@ def test_inbox_contains_routine_results_mentions_and_bot_notices(monkeypatch):
         assert wait_mission(c,mid,{'done'})['status']=='done'
         assert any(n['kind']=='routine' and n['mission_id']==mid for n in c.get('/api/inbox/notices').json())
         assert c.delete('/api/inbox/notices/'+notice['id']).status_code==200
+
+
+def test_scheduled_routine_runs_unattended_and_retries_once(monkeypatch):
+    import time
+    from fastapi import HTTPException
+    monkeypatch.setattr(service.httpx,'AsyncClient',FakeClient)
+    # A pre-dispatch failure is retried, with no uncertain provider charge.
+    FakeClient.responses=[final_reply()]
+    original=service.start_chat;attempts=[]
+    async def flaky(*args,**kwargs):
+        attempts.append(True)
+        if len(attempts)==1: raise HTTPException(503,'Temporary startup failure')
+        return await original(*args,**kwargs)
+    monkeypatch.setattr(service,'start_chat',flaky)
+    with TestClient(service.app) as c:
+        setup(c);configure_budget(c)
+        bot=c.post('/api/bots',json={'name':'Scheduler'}).json()['id']
+        settings=c.get('/api/settings').json();settings['profiles']['smart']=[{'gateway':'openrouter','model':'fixture'}]
+        c.put('/api/settings/profiles',json=settings['profiles'])
+        rid=c.post('/api/routines',json={'title':'Scheduled','instructions':'Report','bot_id':bot,'cron':'0 9 * * *','timezone':'UTC'}).json()['id']
+        with service.db() as db: db.execute('UPDATE routines SET next_at=? WHERE id=?',(time.time()-1,rid))
+        for _ in range(200):
+            history=c.get(f'/api/routines/{rid}/runs').json()
+            if history and history[0]['status']=='done': break
+            time.sleep(.1)
+        assert history and history[0]['status']=='done' and history[0]['retry_count']==1,history
+        assert history[0]['approval']=='approved' and c.get('/api/routine-approvals').json()==[]
+        mission=c.get('/api/missions/'+history[0]['mission_id']).json()
+        assert len(attempts)==2 and len(mission['runs'])==1
+        assert any(n['kind']=='routine' and n['mission_id']==mission['id'] for n in c.get('/api/inbox/notices').json())
