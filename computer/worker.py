@@ -213,14 +213,23 @@ def execute(command,conn=None,desktop=False):
 
 
 def start_browser_proxy():
-    """Bridge local Chromium proxy connections to the backend's root socket.
+    """Bridge loopback to the backend in a separate root helper process.
 
-    This process is the only network path: the container has no network other
-    than loopback, and authorization is enforced by the backend broker.
+    The worker remains single-threaded so its privilege-dropping forks cannot
+    deadlock on locks held by a vanished thread.
     """
     server=socket.socket(socket.AF_INET,socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
     server.bind(('127.0.0.1',0));server.listen(12)
+    port=server.getsockname()[1];pid=os.fork()
+    if pid:
+        server.close();return port,pid
+    # Do not leak the worker control connection or listener to this helper.
+    keep=server.fileno()
+    for name in os.listdir('/proc/self/fd'):
+        if name.isdigit() and int(name)>2 and int(name)!=keep:
+            try: os.close(int(name))
+            except OSError: pass
     slots=threading.BoundedSemaphore(12)
     def forward(client):
         upstream=None
@@ -241,14 +250,20 @@ def start_browser_proxy():
             client.close()
             if upstream: upstream.close()
             slots.release()
-    def accept():
+    try:
         while True:
-            try: client,_=server.accept()
-            except OSError: return
+            client,_=server.accept()
             if not slots.acquire(blocking=False): client.close();continue
             threading.Thread(target=forward,args=(client,),daemon=True).start()
-    threading.Thread(target=accept,daemon=True).start()
-    return server
+    except BaseException: os._exit(1)
+
+
+def stop_browser_proxy(pid):
+    if pid is None: return
+    try: os.kill(pid,signal.SIGKILL)
+    except ProcessLookupError: pass
+    try: os.waitpid(pid,0)
+    except ChildProcessError: pass
 
 SESSION_IDLE=120
 SESSION_HARD=600
@@ -270,11 +285,11 @@ def browser_reply(browser,timeout):
 
 def serve_session(conn,workspace):
     """Keep one browser and desktop alive across actions, never across clients."""
-    browser=None;proxy=None;graceful=False
+    browser=None;proxy_pid=None;graceful=False
     try:
         restore_as_user(workspace);start_desktop(conn)
-        proxy=start_browser_proxy()
-        browser=subprocess.Popen(['python','-u','/session_browser.py'],cwd=WORKSPACE,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,env={'PATH':'/usr/local/bin:/usr/bin:/bin','HOME':'/tmp','TMPDIR':'/tmp','DISPLAY':':99','PYTHONUNBUFFERED':'1','FUNK_BROWSER_PROXY_PORT':str(proxy.getsockname()[1])},preexec_fn=drop_privileges,start_new_session=True)
+        proxy_port,proxy_pid=start_browser_proxy()
+        browser=subprocess.Popen(['python','-u','/session_browser.py'],cwd=WORKSPACE,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,env={'PATH':'/usr/local/bin:/usr/bin:/bin','HOME':'/tmp','TMPDIR':'/tmp','DISPLAY':':99','PYTHONUNBUFFERED':'1','FUNK_BROWSER_PROXY_PORT':str(proxy_port)},preexec_fn=drop_privileges,start_new_session=True)
         ready,_,_=select.select([browser.stdout],[],[],20)
         if not ready or json.loads(browser.stdout.readline(4096))!={'ready':True}: raise RuntimeError('Browser failed to start.')
         session_send(conn,{'session':'started'})
@@ -322,32 +337,32 @@ def serve_session(conn,workspace):
     except Exception:
         try: session_send(conn,{'error':'Desktop session failed; actions may have run and the previous workspace was retained.'})
         except OSError: pass
-    if proxy: proxy.close()
+    stop_browser_proxy(proxy_pid)
     # PID 1 exits after return; the private namespace is discarded.
 
 
 
 def start_kill_switch():
-    """Root-only out-of-band kill request; exiting PID 1 tears down the container."""
+    """Root-only helper asks PID 1 to exit, tearing down the container."""
     path='/control/computer-kill.sock'
     try: os.unlink(path)
     except FileNotFoundError: pass
     server=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);server.bind(path);os.chmod(path,0o600);server.listen(2)
-    def listen():
+    signal.signal(signal.SIGUSR1,lambda *_:os._exit(137))
+    pid=os.fork()
+    if pid:
+        server.close();return pid
+    try:
         while True:
-            try:
-                conn,_=server.accept()
-                with conn:
-                    conn.settimeout(2)
-                    data=b''
-                    while len(data)<5:
-                        chunk=conn.recv(5-len(data))
-                        if not chunk: break
-                        data+=chunk
-                    if data==b'kill\n': os._exit(137)
-            except OSError: continue
-    threading.Thread(target=listen,daemon=True).start()
-    return server
+            conn,_=server.accept()
+            with conn:
+                conn.settimeout(2);data=b''
+                while len(data)<5:
+                    chunk=conn.recv(5-len(data))
+                    if not chunk: break
+                    data+=chunk
+                if data==b'kill\n': os.kill(1,signal.SIGUSR1)
+    except BaseException: os._exit(1)
 
 
 def main():

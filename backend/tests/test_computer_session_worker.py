@@ -46,6 +46,8 @@ def test_session_persists_actions_and_exclusive_takeover(monkeypatch):
     worker=load_worker(monkeypatch);processes=[];inputs=[]
     monkeypatch.setattr(worker,'restore_as_user',lambda _:None)
     monkeypatch.setattr(worker,'start_desktop',lambda _:None)
+    monkeypatch.setattr(worker,'start_browser_proxy',lambda:(12345,None))
+    monkeypatch.setattr(worker,'stop_browser_proxy',lambda _:None)
     monkeypatch.setattr(worker,'desktop_frame',lambda:b'\x89PNG\r\n\x1a\nfixture')
     monkeypatch.setattr(worker,'desktop_input',lambda event:inputs.append(event))
     monkeypatch.setattr(worker,'collect_as_user',lambda:{'dirs':[],'files':{}})
