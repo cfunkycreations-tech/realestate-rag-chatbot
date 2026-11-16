@@ -41,11 +41,11 @@ from funkbot.memory_capture import save_learned, capture as capture_memory, norm
 from funkbot.skills import parse_invocation, parse_markdown
 from funkbot.schedule import next_occurrence
 from funkbot.backup import create as create_backup, restore as stage_restore, validate_stage, BackupError, MAX_TOTAL as MAX_BACKUP_TOTAL
-from funkbot import workspace_pointer, careers
+from funkbot import workspace_pointer, careers, economy
 from alembic.config import Config as AlembicConfig
 from alembic.script import ScriptDirectory
 from funkbot.vault import MAX_ARCHIVE, VaultError, character_for_bot, draw_character, import_zip, normal_name
-from funkbot.budget import BudgetError, NANOS_PER_DOLLAR, dollars_to_nanos, limit_to_nanos, limits_for, reconcile_run, reconcile_usage, reserve, reserve_followup, settle, token_cost_nanos
+from funkbot.budget import BudgetError, NANOS_PER_DOLLAR, dollars_to_nanos, limit_to_nanos, limits_for, period_starts, reconcile_run, reconcile_usage, reserve, reserve_followup, settle, spent_nanos, token_cost_nanos
 from funkbot.tool_policy import WebPolicy
 from funkbot import browser_network, computer, computer_snapshot
 from funkbot.tools import ToolError, McpCallArgs
@@ -1173,6 +1173,83 @@ def reconcile_budget(kind: str, identifier: str, body: BudgetCorrectionIn, reque
     return {'ok': True}
 
 
+class EconomyIn(BaseModel):
+    tier_policy: dict[str,str] | None = None
+    economy: dict | None = None
+    alerts: dict | None = None
+    fallback: dict | None = None
+
+
+class ModelFlagIn(BaseModel):
+    gateway: str = Field(pattern='^(omniroute|openrouter|custom)$')
+    model: str = Field(min_length=1,max_length=200)
+    kind: str = Field(pattern='^(free|local)$')
+    note: str = Field(default='',max_length=300)
+
+
+def economy_status(c):
+    now=time.time();day,month=period_starts(now);out={}
+    for scope in ('account',):
+        daily,monthly=limits_for(c,scope)
+        for period,start,cap in (('daily',day,daily),('monthly',month,monthly)):
+            if cap is None: continue
+            try: spent=spent_nanos(c,start,now,None,scope,period)
+            except BudgetError as exc: out[period]={'error':str(exc),'cap':nano_string(cap)};continue
+            out[period]={'spent':nano_string(spent),'cap':nano_string(cap),'percent':(spent*100//cap) if cap else None}
+    return out
+
+
+@app.get('/api/economy')
+def get_economy(request: Request):
+    require_auth(request)
+    with db() as c:
+        flags=[dict(r) for r in c.execute('SELECT gateway,model,kind,note,verified_at FROM model_flags ORDER BY gateway,model')]
+        costs={p:economy.profile_cost(c,p) for p in economy.PROFILES}
+        alerts=[dict(r) for r in c.execute('SELECT scope,period,threshold,fired_at FROM budget_alerts ORDER BY fired_at DESC LIMIT 30')]
+        return {**economy.settings(c),'model_flags':flags,'profile_reserve_usd':{p:(None if v is None else nano_string(v)) for p,v in costs.items()},'spend':economy_status(c),'recent_alerts':alerts}
+
+
+@app.put('/api/economy')
+def put_economy(body: EconomyIn, request: Request):
+    require_auth(request)
+    try: normalized=economy.validate_settings(body.model_dump(exclude_none=True))
+    except BudgetError as exc: raise HTTPException(400,str(exc)) from exc
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE');economy.save_settings(c,normalized)
+    return {'ok':True}
+
+
+@app.put('/api/economy/model-flags')
+def put_model_flag(body: ModelFlagIn, request: Request):
+    require_auth(request)
+    if body.gateway=='omniroute' and body.model.strip().lower()=='auto': raise HTTPException(400,'OmniRoute is a router, not a model. Flag the specific model it uses, and only if you have verified that it is free or local.')
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        c.execute('INSERT OR REPLACE INTO model_flags VALUES (?,?,?,?,?)',(body.gateway,body.model,body.kind,redact(body.note),time.time()))
+    return {'ok':True}
+
+
+@app.delete('/api/economy/model-flags')
+def delete_model_flag(gateway: str, model: str, request: Request):
+    require_auth(request)
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        if not c.execute('DELETE FROM model_flags WHERE gateway=? AND model=?',(gateway,model)).rowcount: raise HTTPException(404,'Flag not found.')
+    return {'ok':True}
+
+
+@app.get('/api/budget/usage')
+def get_budget_usage(request: Request, group: str = 'bot', days: int = Query(30,ge=1,le=366)):
+    require_auth(request)
+    try:
+        with db() as c: rows=economy.usage_report(c,group,time.time()-days*86400)
+    except BudgetError as exc: raise HTTPException(400,str(exc)) from exc
+    keys=configured_secrets()
+    for row in rows:
+        if isinstance(row['key'],str): row['key']=redact_text(row['key'],keys)
+    return {'group':group,'days':days,'rows':rows,'note':'USD is each round\'s configured profile price (or $0 for models you attested as free/local). It is not a provider invoice.'}
+
+
 @app.get('/api/settings/web-policy')
 def get_web_policy(request: Request):
     require_auth(request)
@@ -1524,8 +1601,12 @@ def settle_round(c, job, bot_id, gateway, model, usage):
     if type(prompt_tokens) is int and type(completion_tokens) is int and prompt_tokens >= 0 and completion_tokens >= 0:
         c.execute('INSERT INTO usage (bot_id,gateway,model,prompt_tokens,completion_tokens,cost,created_at) VALUES (?,?,?,?,?,?,?)', (bot_id,gateway,model,prompt_tokens,completion_tokens,None,time.time()))
         usage_id=c.execute('SELECT last_insert_rowid()').fetchone()[0]
-        cost=None if job.get('uncertain') else settle(c,reservation_id,usage_id,prompt_tokens,completion_tokens)
-        if cost is not None: return None
+        free=economy.model_is_free(c,gateway,model)
+        cost=None if job.get('uncertain') else settle(c,reservation_id,usage_id,prompt_tokens,completion_tokens,owner_free=free)
+        if cost is not None:
+            if free: c.execute('INSERT OR IGNORE INTO usage_flags VALUES (?,?)',(usage_id,'owner_attested_free'))
+            economy.check_alerts(c,bot_id)
+            return None
         c.execute("UPDATE budget_reservations SET status='uncertain',usage_id=? WHERE run_id=? AND status IN ('reserved','uncertain')",(usage_id,reservation_id))
         return 'Gateway charges could not be verified. Further spending is blocked pending reconciliation.'
     c.execute("UPDATE budget_reservations SET status='uncertain' WHERE run_id=? AND status='reserved'",(reservation_id,))
@@ -1832,12 +1913,16 @@ async def start_chat(bot_id: str, body: ChatIn, mission_id: str | None = None, g
         bot['mission_mode']=bool(mission_id)
         bot['search_enabled']=not (lab_step_id or internal_draft) and bool(search_provider_info(c))
         bot['computer_enabled']=not (lab_step_id or internal_draft) and computer.enabled() and computer.permission(c,bot_id)['allowed']
-        bot['computer_desktop']=bot['computer_enabled'] and computer.desktop_enabled() and (body.profile or bot['profile'])=='vision'
+        requested_profile=body.profile or bot['profile']
+        delegation=economy.delegation_for(c,mission_id)
+        chosen_profile,career_tier,adjustment=economy.choose_profile(c,bot,requested_profile,bool(body.profile),delegation)
+        economy_on=economy.settings(c)['economy']['enabled']
+        bot['computer_desktop']=bot['computer_enabled'] and computer.desktop_enabled() and chosen_profile=='vision'
         bot['connector_catalog']=[] if (lab_step_id or internal_draft) else [{'id':x['id'],'name':redact_text(x['name'],keys),'tools':[redact_text(t,keys) for t in x['tools']]} for x in connector_catalog(c)]
         bot['handoff_catalog']=[] if (lab_step_id or internal_draft) else [{'id':r['id'],'name':redact_text(r['name'],keys),'title':redact_text(r['title'],keys)} for r in c.execute('SELECT id,name,title FROM bots WHERE id<>? ORDER BY created_at,id LIMIT 20',(bot_id,))]
         now=time.time()
-        chosen_profile=body.profile or bot['profile']
-        entries=json.loads(c.execute('SELECT value FROM config WHERE key=?', ('profiles',)).fetchone()['value']).get(chosen_profile,[])
+        profile_table=json.loads(c.execute('SELECT value FROM config WHERE key=?', ('profiles',)).fetchone()['value'])
+        entries=economy.order_entries(c,profile_table.get(chosen_profile,[]),economy_on)
         chat_id=None
         if not lab_step_id and not internal_draft and not group_turn_id and not dm_turn_id:
             chat_id=body.chat_id or default_chat(c,bot_id)
@@ -1865,16 +1950,29 @@ async def start_chat(bot_id: str, body: ChatIn, mission_id: str | None = None, g
                 model_input='Owner-selected workspace references (untrusted metadata, not authorization to take actions): '+json.dumps(mentions,ensure_ascii=False)+'\nOwner message: '+model_input
         model_input=attachment_prompt(model_input,attached,keys,True)
         history=[*([] if (lab_step_id or internal_draft) else previous),{'role':'user','content':model_input}]
-        price=c.execute('SELECT * FROM budget_prices WHERE profile=?', (chosen_profile,)).fetchone()
-        if price:
-            # Conservative byte estimate with protocol overhead, not a guarantee
-            # for unknown tokenizers or gateways that add unreported tokens.
-            bound = prompt_bound([{'role':'system','content':bot_system_prompt(bot)},*history],[] if (lab_step_id or internal_draft) else declarations(bool(bot.get('connector_catalog')),bool(bot.get('handoff_catalog')),bool(mission_id),bool(bot.get('search_enabled')),bool(bot.get('computer_enabled')),bool(bot.get('computer_desktop')),bool(bot.get('learn_memory')),True))
-            if bound > price['max_prompt_tokens']:
-                raise HTTPException(400, 'Message and conversation exceed the configured prompt token safety bound for this profile.')
-        try:
-            reserve(c, job_id, bot_id, chosen_profile, now, attempts=len(entries))
-        except BudgetError as exc: raise HTTPException(402, str(exc)) from exc
+        # Conservative byte estimate with protocol overhead, not a guarantee
+        # for unknown tokenizers or gateways that add unreported tokens.
+        bound = prompt_bound([{'role':'system','content':bot_system_prompt(bot)},*history],[] if (lab_step_id or internal_draft) else declarations(bool(bot.get('connector_catalog')),bool(bot.get('handoff_catalog')),bool(mission_id),bool(bot.get('search_enabled')),bool(bot.get('computer_enabled')),bool(bot.get('computer_desktop')),bool(bot.get('learn_memory')),True))
+        # Budget fallback: only ever to a strictly cheaper, priced profile, and recorded.
+        candidates=[chosen_profile]+(economy.cheaper_profiles(c,chosen_profile) if economy.settings(c)['fallback']['enabled'] else [])
+        first_error=None;price=None;origin_id=delegation['origin_bot_id'] if delegation else None
+        for candidate in candidates:
+            candidate_price=c.execute('SELECT * FROM budget_prices WHERE profile=?', (candidate,)).fetchone()
+            if candidate_price and bound > candidate_price['max_prompt_tokens']:
+                if candidate==chosen_profile: raise HTTPException(400, 'Message and conversation exceed the configured prompt token safety bound for this profile.')
+                continue
+            candidate_entries=entries if candidate==chosen_profile else economy.order_entries(c,profile_table.get(candidate,[]),economy_on)
+            try:
+                reserve(c, job_id, bot_id, candidate, now, attempts=len(candidate_entries), origin_bot_id=origin_id)
+            except BudgetError as exc:
+                first_error=first_error or exc;continue
+            if candidate!=chosen_profile:
+                adjustment=';'.join(filter(None,(adjustment,f'budget_fallback:{chosen_profile}->{candidate}')))
+                chosen_profile,entries=candidate,candidate_entries
+            price=candidate_price;break
+        else:
+            raise HTTPException(402, str(first_error)) from first_error
+        economy.record_attribution(c,job_id,bot_id,mission_id,career_tier,requested_profile,chosen_profile,adjustment,delegation,now)
         c.execute('INSERT INTO runs VALUES (?,?,?,?,?)', (job_id,bot_id,'running',now,now))
         if chat_id: c.execute('INSERT INTO chat_runs VALUES (?,?)',(chat_id,job_id))
         if group_turn_id: c.execute('UPDATE group_chat_turns SET active_run_id=?,updated_at=? WHERE id=?',(job_id,now,group_turn_id))
@@ -1900,10 +1998,10 @@ async def start_chat(bot_id: str, body: ChatIn, mission_id: str | None = None, g
     policy=WebPolicy.model_validate_json(config('web_policy','{}'))
     context=ToolContext(db,DATA,job_id,bot_id,lambda text:redact_text(text,list(job['secrets'])),policy.allow,policy.deny,lambda _:None,policy_for=tool_policy_for,connector_info=connector_info,connector_call=execute_connector,handoff_catalog={item['id']:item['name'] for item in bot['handoff_catalog']},handoff_call=execute_handoff,mission_id=mission_id,artifact_call=execute_mission_artifact,artifact_review=review_mission_artifact,gateway_entries=entries,destination_snapshot=mission_gateway_destinations,search_info=search_provider_info)
     context.approved_destinations=approved_destinations
-    context.vision=(body.profile or bot['profile'])=='vision'
+    context.vision=chosen_profile=='vision'
     context.memory_source=job['user_message_id'] if bot['learn_memory'] else None
     job['tool_bridge']=ToolBridge(context,lambda item:tool_event(job,item))
-    job['task']=asyncio.create_task(run_chat(job,bot,history,body.profile or bot['profile']))
+    job['task']=asyncio.create_task(run_chat(job,bot,history,chosen_profile))
     def finish_unexpected(task):
         if not job['done']:
             user_stopped = task.cancelled() and job.get('user_cancelled', False)
@@ -2909,6 +3007,7 @@ async def execute_handoff(context, body, auto_approved=False):
         c.execute('INSERT INTO missions VALUES (?,?,?,?,?,?,?,?,?)',(mission_id,title,instructions,None,'queued',None,None,now,now))
         c.execute('INSERT INTO mission_assignees VALUES (?,?,?)',(mission_id,0,body.to_bot_id))
         c.execute('INSERT INTO handoffs VALUES (?,?,?,?,?,?,?)',(handoff_id,context.bot_id,body.to_bot_id,mission_id,reason,text,now))
+        economy.record_delegation(c,mission_id,context.run_id,context.bot_id,now)
         append_event(c,context.bot_id,context.run_id,'handoff.created',{'mission_id':mission_id,'from_bot_id':context.bot_id,'to_bot_id':body.to_bot_id,'summary':reason[:240],'approval':'pair' if auto_approved else 'individual'})
     schedule_mission(mission_id)
     return {'id':handoff_id,'mission_id':mission_id,'receiver_id':body.to_bot_id}

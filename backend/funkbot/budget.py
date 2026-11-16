@@ -62,7 +62,44 @@ def limits_for(c, scope):
     return (row['daily_nanos'], row['monthly_nanos']) if row else (DEFAULT_DAILY, None)
 
 
-def reserve(c, run_id, bot_id, profile, now, attempts=1, parent_run_id=None):
+def spent_nanos(c, start, now, bot_id=None, scope='account', period='daily'):
+    """Verified spend plus outstanding commitments in [start, now].
+
+    One implementation serves enforcement (reserve) and reporting/alerts, so
+    what the dashboard shows is exactly what blocks. Fails closed on unknown
+    historical cost or an unreconciled run.
+    """
+    condition = ' AND bot_id=?' if bot_id else ''
+    params = (start, now, bot_id) if bot_id else (start, now)
+    old = c.execute('''SELECT cost FROM usage WHERE created_at>=? AND created_at<=?''' + condition +
+        ' AND NOT EXISTS (SELECT 1 FROM budget_reservations WHERE budget_reservations.usage_id=usage.id)', params).fetchall()
+    if any(row['cost'] is None for row in old):
+        raise BudgetError(f'{scope} has historical usage without a cost in this {period} period; spending cannot be verified.')
+    spent = sum(dollars_to_nanos(row['cost']) for row in old)
+    # Outstanding commitments can cross UTC midnight/month-end; count
+    # them in every current period until reconciled, never just by start.
+    reservations = c.execute("SELECT * FROM budget_reservations WHERE (status IN ('reserved','uncertain') OR (status='settled' AND settled_at>=? AND settled_at<=?))" + condition, params).fetchall()
+    if any(row['status'] == 'uncertain' for row in reservations):
+        raise BudgetError(f'{scope} has an unreconciled run in this {period} period; spending cannot be verified.')
+    return spent + sum(row['actual_nanos'] if row['status'] == 'settled' else row['reserved_nanos'] for row in reservations)
+
+
+def delegated_nanos(c, origin_bot_id, start, now):
+    """Spend by OTHER Bots on work delegated from origin_bot_id (any depth).
+
+    Counted toward the origin's own cap so a capped Bot cannot hand work to an
+    uncapped receiver. The origin's own runs are never double-counted.
+    """
+    rows = c.execute('''SELECT r.status,r.actual_nanos,r.reserved_nanos FROM budget_reservations r
+        JOIN run_attribution a ON a.run_id=r.parent_run_id
+        WHERE a.origin_bot_id=? AND a.bot_id<>? AND a.delegated=1
+        AND (r.status IN ('reserved','uncertain') OR (r.status='settled' AND r.settled_at>=? AND r.settled_at<=?))''', (origin_bot_id, origin_bot_id, start, now)).fetchall()
+    if any(row['status'] == 'uncertain' for row in rows):
+        raise BudgetError('Delegated work from this Bot has an unreconciled run; spending cannot be verified.')
+    return sum(row['actual_nanos'] if row['status'] == 'settled' else row['reserved_nanos'] for row in rows)
+
+
+def reserve(c, run_id, bot_id, profile, now, attempts=1, parent_run_id=None, origin_bot_id=None):
     """Reserve the configured maximum. Caller holds BEGIN IMMEDIATE.
 
     Existing historical usage is included once; missing historical costs or an
@@ -82,36 +119,35 @@ def reserve(c, run_id, bot_id, profile, now, attempts=1, parent_run_id=None):
         for start, cap, period in [(day, daily, 'daily'), (month, monthly, 'monthly')]:
             if cap is None:
                 continue
-            condition = ' AND bot_id=?' if bot_filter else ''
-            params = (start, now, bot_filter) if bot_filter else (start, now)
-            old = c.execute('''SELECT cost FROM usage WHERE created_at>=? AND created_at<=?''' + condition +
-                ' AND NOT EXISTS (SELECT 1 FROM budget_reservations WHERE budget_reservations.usage_id=usage.id)', params).fetchall()
-            if any(row['cost'] is None for row in old):
-                raise BudgetError(f'{scope} has historical usage without a cost in this {period} period; spending cannot be verified.')
-            spent = sum(dollars_to_nanos(row['cost']) for row in old)
-            # Outstanding commitments can cross UTC midnight/month-end; count
-            # them in every current period until reconciled, never just by start.
-            reservation_params = (start, now, bot_filter) if bot_filter else (start, now)
-            reservations = c.execute("SELECT * FROM budget_reservations WHERE (status IN ('reserved','uncertain') OR (status='settled' AND settled_at>=? AND settled_at<=?))" + condition, reservation_params).fetchall()
-            if any(row['status'] == 'uncertain' for row in reservations):
-                raise BudgetError(f'{scope} has an unreconciled run in this {period} period; spending cannot be verified.')
-            spent += sum(row['actual_nanos'] if row['status'] == 'settled' else row['reserved_nanos'] for row in reservations)
+            spent = spent_nanos(c, start, now, bot_filter, scope, period)
             if spent + maximum > cap:
                 raise BudgetError(f'{scope} {period} budget cap would be exceeded by the configured reservation for this run.')
+    if origin_bot_id and origin_bot_id != bot_id:
+        # Delegated work also counts against the Bot that originated it.
+        scope = 'bot:' + origin_bot_id
+        daily, monthly = limits_for(c, scope)
+        for start, cap, period in [(day, daily, 'daily'), (month, monthly, 'monthly')]:
+            if cap is None:
+                continue
+            spent = spent_nanos(c, start, now, origin_bot_id, scope, period) + delegated_nanos(c, origin_bot_id, start, now)
+            if spent + maximum > cap:
+                raise BudgetError(f'The delegating Bot\'s {period} budget cap would be exceeded by this delegated work.')
     c.execute('''INSERT INTO budget_reservations
         (run_id,bot_id,profile,created_at,reserved_nanos,prompt_usd_per_million,completion_usd_per_million,max_prompt_tokens,max_completion_tokens,status,parent_run_id)
         VALUES (?,?,?,?,?,?,?,?,?,'reserved',?)''', (run_id,bot_id,profile,now,maximum,price['prompt_usd_per_million'],price['completion_usd_per_million'],price['max_prompt_tokens'],price['max_completion_tokens'],parent_run_id or run_id))
     return maximum
 
 
-def settle(c, run_id, usage_id, prompt_tokens, completion_tokens, now=None):
+def settle(c, run_id, usage_id, prompt_tokens, completion_tokens, now=None, owner_free=False):
+    """Settle a round. owner_free means the owner attested this exact model is
+    free or local; it is never inferred. Token limits are still enforced."""
     row = c.execute('SELECT * FROM budget_reservations WHERE run_id=?', (run_id,)).fetchone()
     if not row or row['status'] != 'reserved':
         raise BudgetError('Reservation is not active.')
     try:
         if prompt_tokens > row['max_prompt_tokens'] or completion_tokens > row['max_completion_tokens']:
             raise BudgetError('Gateway exceeded the configured token limit.')
-        cost = token_cost_nanos(prompt_tokens, completion_tokens, row['prompt_usd_per_million'], row['completion_usd_per_million'])
+        cost = 0 if owner_free else token_cost_nanos(prompt_tokens, completion_tokens, row['prompt_usd_per_million'], row['completion_usd_per_million'])
         usage = c.execute('SELECT bot_id,prompt_tokens,completion_tokens FROM usage WHERE id=?', (usage_id,)).fetchone()
         if not usage or usage['bot_id'] != row['bot_id'] or usage['prompt_tokens'] != prompt_tokens or usage['completion_tokens'] != completion_tokens:
             raise BudgetError('Usage record does not match the reservation.')
@@ -172,5 +208,6 @@ def reserve_followup(c, parent_run_id, bot_id, profile, now, attempts=1):
     if any(row['status'] in ('reserved','uncertain') for row in prior):
         raise BudgetError('The previous model request has not been reconciled.')
     request_id=str(uuid.uuid4())
-    amount=reserve(c,request_id,bot_id,profile,now,attempts=attempts,parent_run_id=parent_run_id)
+    origin=c.execute('SELECT origin_bot_id FROM run_attribution WHERE run_id=? AND delegated=1',(parent_run_id,)).fetchone()
+    amount=reserve(c,request_id,bot_id,profile,now,attempts=attempts,parent_run_id=parent_run_id,origin_bot_id=origin['origin_bot_id'] if origin else None)
     return request_id,amount
