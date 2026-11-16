@@ -5,6 +5,7 @@
 computer/*
 !computer/Dockerfile
 !computer/worker.py
+!computer/session_browser.py
 !backend/
 backend/*
 !backend/funkbot/

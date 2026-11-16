@@ -151,19 +151,21 @@ def desktop_frame():
     return None
 
 
+def start_desktop(conn):
+    display=subprocess.Popen(['Xvfb',':99','-screen','0','1024x768x24','-nolisten','tcp','-noreset'],cwd=WORKSPACE,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,env={'PATH':'/usr/bin:/bin','HOME':WORKSPACE},preexec_fn=drop_privileges,start_new_session=True)
+    env={'DISPLAY':':99','PATH':'/usr/bin:/bin','HOME':WORKSPACE}
+    for _ in range(30):
+        if peer_disconnected(conn): raise CommandCancelled()
+        check=subprocess.run(['xdpyinfo'],env=env,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,preexec_fn=drop_privileges,timeout=2,check=False)
+        if check.returncode==0: break
+        time.sleep(.1)
+    else: raise RuntimeError('Virtual display could not start.')
+    subprocess.Popen(['openbox'],cwd=WORKSPACE,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,env=env,preexec_fn=drop_privileges,start_new_session=True)
+    return display
+
+
 def execute(command,conn=None,desktop=False):
-    display=None
-    if desktop:
-        display=subprocess.Popen(['Xvfb',':99','-screen','0','1024x768x24','-nolisten','tcp','-noreset'],cwd=WORKSPACE,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,env={'PATH':'/usr/bin:/bin','HOME':WORKSPACE},preexec_fn=drop_privileges,start_new_session=True)
-        # Wait for the local display before launching the command.
-        env={'DISPLAY':':99','PATH':'/usr/bin:/bin','HOME':WORKSPACE}
-        for _ in range(30):
-            if peer_disconnected(conn): raise CommandCancelled()
-            check=subprocess.run(['xdpyinfo'],env=env,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,preexec_fn=drop_privileges,timeout=2,check=False)
-            if check.returncode==0: break
-            time.sleep(.1)
-        else: raise RuntimeError('Virtual display could not start.')
-        subprocess.Popen(['openbox'],cwd=WORKSPACE,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,env=env,preexec_fn=drop_privileges,start_new_session=True)
+    if desktop: start_desktop(conn)
     with tempfile.TemporaryFile(dir=TEMP) as output:
         if peer_disconnected(conn): raise CommandCancelled()
         process=subprocess.Popen(['/bin/sh','-c',command],cwd=WORKSPACE,
@@ -207,6 +209,81 @@ def execute(command,conn=None,desktop=False):
                 'truncated':len(data)>MAX_OUTPUT,'exit_code':code,'timed_out':timed_out}
 
 
+
+SESSION_IDLE=120
+SESSION_HARD=600
+
+
+def session_send(conn,body):
+    conn.sendall(json.dumps(body,ensure_ascii=True,separators=(',',':')).encode()+b'\n')
+
+
+def browser_reply(browser,timeout):
+    ready,_,_=select.select([browser.stdout],[],[],timeout)
+    if not ready: raise RuntimeError('Browser did not respond before its deadline.')
+    line=browser.stdout.readline(32000)
+    if not line or len(line)>=32000: raise RuntimeError('Browser response is invalid.')
+    response=json.loads(line)
+    if not isinstance(response,dict) or type(response.get('ok')) is not bool: raise RuntimeError('Browser response is invalid.')
+    return response
+
+
+def serve_session(conn,workspace):
+    """Keep one browser and desktop alive across actions, never across clients."""
+    browser=None;graceful=False
+    try:
+        restore_as_user(workspace);start_desktop(conn)
+        browser=subprocess.Popen(['python','-u','/session_browser.py'],cwd=WORKSPACE,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,env={'PATH':'/usr/local/bin:/usr/bin:/bin','HOME':WORKSPACE,'TMPDIR':'/tmp','DISPLAY':':99','PYTHONUNBUFFERED':'1'},preexec_fn=drop_privileges,start_new_session=True)
+        ready,_,_=select.select([browser.stdout],[],[],20)
+        if not ready or json.loads(browser.stdout.readline(4096))!={'ready':True}: raise RuntimeError('Browser failed to start.')
+        session_send(conn,{'session':'started'})
+        start=last_activity=time.monotonic();next_frame=start;incoming=b'';takeover=False
+        while True:
+            now=time.monotonic()
+            if now-start>=SESSION_HARD or now-last_activity>=SESSION_IDLE:
+                reason='hard_timeout' if now-start>=SESSION_HARD else 'idle_timeout';graceful=True;break
+            ready,_,_=select.select([conn],[],[],.1)
+            if ready:
+                data=conn.recv(16384)
+                if not data: raise CommandCancelled()
+                incoming+=data
+                if len(incoming)>20000: raise RuntimeError('Session request is too large.')
+                while b'\n' in incoming:
+                    line,incoming=incoming.split(b'\n',1)
+                    message=json.loads(line)
+                    if not isinstance(message,dict) or not isinstance(message.get('type'),str): raise RuntimeError('Invalid session request.')
+                    kind=message['type'];last_activity=time.monotonic()
+                    if kind=='close' and set(message)=={'type'}: reason='closed';graceful=True;break
+                    if kind=='takeover' and set(message)=={'type','enabled','id'} and type(message['enabled']) is bool and isinstance(message['id'],str):
+                        takeover=message['enabled'];session_send(conn,{'id':message['id'],'ok':True,'takeover':takeover})
+                    elif kind=='owner_input' and set(message)=={'type','event'}:
+                        if takeover: desktop_input(message['event'])
+                    elif kind=='action' and set(message)=={'type','id','action'} and isinstance(message['id'],str) and len(message['id'])<=128:
+                        if takeover:
+                            session_send(conn,{'id':message['id'],'ok':False,'error':'The owner controls the desktop.'});continue
+                        browser.stdin.write(json.dumps(message['action'],ensure_ascii=True).encode()+b'\n');browser.stdin.flush()
+                        response=browser_reply(browser,15)
+                        frame=desktop_frame()
+                        if frame: response['frame']=base64.b64encode(frame).decode('ascii')
+                        elif response['ok']: response={'ok':False,'error':'Action may have run, but desktop capture failed; do not retry without review.'}
+                        session_send(conn,{'id':message['id'],**response})
+                    else: raise RuntimeError('Invalid session request.')
+                if graceful: break
+            if time.monotonic()>=next_frame:
+                frame=desktop_frame();next_frame=time.monotonic()+1
+                if frame: session_send(conn,{'frame':base64.b64encode(frame).decode('ascii')})
+        stop_unprivileged_processes()
+        saved=collect_as_user()
+        session_send(conn,{'session':'ended','reason':reason,'workspace':saved})
+    except CommandCancelled:
+        try: stop_unprivileged_processes()
+        except Exception: pass
+    except Exception:
+        try: session_send(conn,{'error':'Desktop session failed; actions may have run and the previous workspace was retained.'})
+        except OSError: pass
+    # PID 1 exits after return; the private namespace is discarded.
+
+
 def main():
     if os.getpid()!=1: raise RuntimeError('Worker requires a private container PID namespace with Python as PID 1.')
     control_dir=os.path.dirname(CONTROL)
@@ -228,6 +305,10 @@ def main():
                     data+=chunk
                 if len(data)>MAX_REQUEST or not data.endswith(b'\n'): continue
                 request=json.loads(data)
+                if isinstance(request,dict) and set(request)=={'mode','workspace'} and request['mode']=='session':
+                    snapshot.validate(request['workspace'])
+                    serve_session(conn,request['workspace'])
+                    return
                 if not isinstance(request,dict) or set(request) not in ({'command','workspace'},{'command','workspace','desktop'}) or type(request.get('desktop',False)) is not bool or not isinstance(request['command'],str) or not 1<=len(request['command'])<=8000 or '\x00' in request['command']: continue
                 snapshot.validate(request['workspace'])
             except (ValueError,OSError,TimeoutError,RecursionError): continue
