@@ -193,6 +193,18 @@ def install_career(c, bot_id, preset, *, birth_mode, now=None):
               (bot_id, 'born', json.dumps({'preset_id': preset['id'], 'preset_version': preset['version'], 'birth_mode': birth_mode, 'level': preset['level']}), now))
 
 
+def copy_career(c, source_id, new_id, now=None):
+    """A duplicated Bot keeps the Career DNA its copied instructions came from. No-op for hand-made Bots."""
+    now = now or time.time()
+    row = c.execute('SELECT * FROM bot_careers WHERE bot_id=?', (source_id,)).fetchone()
+    if row is None:
+        return
+    c.execute('INSERT INTO bot_careers VALUES (?,?,?,?,?,?,?,?,?)',
+              (new_id, row['preset_id'], row['preset_version'], row['career_json'], row['level'], row['department'], row['model_tier'], None, now))
+    c.execute('INSERT INTO career_history(bot_id,event,detail,created_at) VALUES (?,?,?,?)',
+              (new_id, 'duplicated', json.dumps({'from_bot_id': source_id, 'preset_id': row['preset_id'], 'preset_version': row['preset_version']}), now))
+
+
 def get_career(c, bot_id):
     row = c.execute('SELECT * FROM bot_careers WHERE bot_id=?', (bot_id,)).fetchone()
     if row is None:

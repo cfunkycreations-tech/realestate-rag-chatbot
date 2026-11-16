@@ -260,3 +260,41 @@ input[type=file]::file-selector-button:hover{box-shadow:0 0 12px color-mix(in sr
  .project-row>div,.group-chat-create>div>*{min-width:0}
  .desktop-inputs input,.desktop-inputs select{width:100%}
 }
+
+/* ---- Career hiring (Employee DNA) ---- */
+.career-tabs{margin:0 0 14px}
+.career-birth,.career-empty{display:grid;gap:12px;min-width:0}
+.career-bar{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.career-search{flex:1 1 220px;display:flex;align-items:center;gap:8px;padding:0 12px;border:1px solid var(--edge-dim);border-radius:12px;background:color-mix(in srgb,var(--surf) 70%,transparent);min-width:0}
+.career-search:focus-within{border-color:var(--edge-bright);box-shadow:0 0 12px color-mix(in srgb,var(--edge) 45%,transparent)}
+.career-search input{flex:1;min-width:0;border:0;background:transparent;box-shadow:none;padding:10px 0;outline:none}
+.career-tools{display:flex;gap:14px;align-items:center;flex-wrap:wrap}
+.career-tools .text-button{display:inline-flex;align-items:center;gap:6px;background:none;border:0;box-shadow:none;padding:6px 0;cursor:pointer;text-decoration:none;font:inherit;font-size:.85rem}
+.career-tools .text-button:hover{text-decoration:underline}
+.career-columns{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.15fr);gap:12px;min-height:0}
+.career-list{max-height:min(46dvh,380px);overflow:auto;padding:4px 6px 4px 0;display:grid;gap:12px;align-content:start;scrollbar-width:thin}
+.career-group{display:grid;gap:5px}
+.career-group small{position:sticky;top:0;z-index:1;padding:4px 2px;background:color-mix(in srgb,var(--surf) 92%,transparent);backdrop-filter:blur(6px);letter-spacing:.12em;text-transform:uppercase;opacity:.75}
+.career-group button{text-align:left;padding:9px 12px;border-radius:10px;border:1px solid transparent;background:color-mix(in srgb,var(--edge) 6%,transparent);color:var(--ink);cursor:pointer;box-shadow:none;transition:border-color .15s,background .15s}
+.career-group button:hover{border-color:var(--edge-dim);background:color-mix(in srgb,var(--edge) 12%,transparent)}
+.career-group button.selected{border-color:var(--edge-bright);background:color-mix(in srgb,var(--edge) 20%,transparent);box-shadow:0 0 12px color-mix(in srgb,var(--edge) 40%,transparent)}
+.career-group button:focus-visible,.career-tools .text-button:focus-visible{outline:2px solid var(--edge-bright);outline-offset:2px}
+.career-preview{border:1px solid var(--edge-dim);border-radius:14px;padding:16px;max-height:min(46dvh,380px);overflow:auto;background:color-mix(in srgb,var(--surf) 60%,transparent);min-width:0}
+.career-preview h3{margin:4px 0 10px;overflow-wrap:anywhere}
+.career-preview p{margin:10px 0 0;line-height:1.5;overflow-wrap:anywhere}
+.career-preview ul{margin:10px 0 0;padding-left:18px;display:grid;gap:4px}
+.career-summary{display:flex;gap:6px;flex-wrap:wrap;margin:0 0 12px}
+.career-preview .career-summary{margin:0}
+.career-chip{font-size:.72rem;letter-spacing:.06em;padding:4px 9px;border-radius:999px;border:1px solid var(--edge-dim);background:color-mix(in srgb,var(--edge) 10%,transparent);white-space:nowrap}
+.career-chip.strong{border-color:var(--edge-bright);background:color-mix(in srgb,var(--edge) 22%,transparent)}
+.career-chip.dim{opacity:.7}
+.career-notice{margin:0;font-size:.85rem;color:var(--edge-bright)}
+.career-actions{flex-wrap:wrap;align-items:center}
+.career-actions .secondary,.career-actions .primary{display:inline-flex;align-items:center;gap:7px}
+.reveal-career{display:grid;gap:4px;margin:14px auto 16px;padding:12px 16px;border:1px solid var(--edge-dim);border-radius:14px;max-width:320px;background:color-mix(in srgb,var(--edge) 9%,transparent)}
+.reveal-career small{letter-spacing:.14em;text-transform:uppercase;opacity:.75}
+.reveal-career span{font-size:.85rem;opacity:.85;text-transform:capitalize}
+@media (max-width:720px){.career-columns{grid-template-columns:minmax(0,1fr)}.career-list{max-height:34dvh}.career-preview{max-height:26dvh}.career-actions{justify-content:stretch}.career-actions button{flex:1 1 auto;justify-content:center}}
+@media (prefers-reduced-motion:reduce){.career-group button{transition:none}}
+.career-tabs button{padding:8px 14px;border-radius:10px 10px 0 0;border-bottom-width:2px}
+.career-tabs button[aria-selected=true]{border-bottom-color:var(--edge-bright)}

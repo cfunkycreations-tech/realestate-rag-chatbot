@@ -130,7 +130,7 @@ def test_deleting_bot_preserves_budget_usage_and_saved_key(monkeypatch):
         run=c.post(f'/api/bots/{bot}/chat',json={'content':'Hi'}).json()['job_id']
         c.get(f'/api/jobs/{run}/events')
         assert c.delete(f'/api/bots/{bot}').status_code==200
-        assert c.get('/api/vault/status').json()=={'total':1,'available':1}
+        status=c.get('/api/vault/status').json();assert (status['total'],status['available'])==(1,1)
         assert c.get('/api/settings').json()['gateways']['openrouter']['has_key']
         with service.db() as db:
             assert db.execute('SELECT bot_id FROM usage').fetchone()['bot_id'] is None

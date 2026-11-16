@@ -584,6 +584,7 @@ def duplicate_bot(bot_id: str, request: Request):
         character=c.execute('SELECT character_id FROM bot_characters WHERE bot_id=?',(bot_id,)).fetchone()
         if character:
             c.execute('INSERT INTO bot_characters VALUES (?,?,?)',(new_id,character['character_id'],now))
+        careers.copy_career(c,bot_id,new_id,now)
         for routine in routines:
             next_at=next_occurrence(routine['cron'],routine['timezone'],now)
             c.execute('INSERT INTO routines VALUES (?,?,?,?,?,?,?,?,?,?)',(str(uuid.uuid4()),routine['title'],routine['instructions'],new_id,routine['cron'],routine['timezone'],1,next_at,now,now))

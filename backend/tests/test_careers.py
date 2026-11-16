@@ -115,3 +115,19 @@ def test_workforce_capacity_limit(monkeypatch):
         client.post('/api/role-presets/import', json={'presets': [role()]})
         assert client.post('/api/bots/birth', json={'mode': 'surprise'}).status_code == 200
         assert client.post('/api/bots/birth', json={'mode': 'surprise'}).status_code == 409
+
+
+def test_duplicate_keeps_career_and_delete_removes_career_rows():
+    with TestClient(service.app) as client:
+        setup(client)
+        client.post('/api/role-presets/import', json={'presets': [role()]})
+        born = client.post('/api/bots/birth', json={'mode': 'surprise'}).json()
+        copy = client.post(f"/api/bots/{born['id']}/duplicate").json()
+        career = client.get(f"/api/bots/{copy['id']}/career").json()['career']
+        assert career['preset_id'] == 'software-architect' and [h['event'] for h in career['history']] == ['duplicated']
+        assert career['history'][0]['detail']['from_bot_id'] == born['id']
+        assert client.delete(f"/api/bots/{born['id']}").status_code == 200
+        with service.db() as c:
+            assert c.execute('SELECT count(*) FROM bot_careers WHERE bot_id=?', (born['id'],)).fetchone()[0] == 0
+            assert c.execute('SELECT count(*) FROM career_history WHERE bot_id=?', (born['id'],)).fetchone()[0] == 0
+            assert c.execute('SELECT count(*) FROM bot_careers WHERE bot_id=?', (copy['id'],)).fetchone()[0] == 1
