@@ -161,3 +161,23 @@
 
 /* Emergency controls stay reachable even over dialogs while a computer is active. */
 .computer-control.computer-active{position:fixed;right:8px;bottom:8px;z-index:3001;max-width:calc(100vw - 16px);flex-wrap:wrap;border:1px solid #ed8290;border-radius:10px;box-shadow:0 4px 20px #000c}.computer-control.computer-active>div{display:flex;flex-wrap:wrap;gap:4px}.desktop-view header{position:sticky;top:-16px;z-index:2;background:#1d1528;padding:8px 0}@media(max-width:700px){.desktop-view header{top:-10px}.computer-control.computer-active{gap:4px}.computer-control.computer-active button{font-size:10px;padding:6px}}
+
+/* Keep task content and controls reachable on a phone. */
+@media(max-width:700px){
+ .command-banner,.command-banner.collapsed{height:76px;min-height:76px}
+ .command-nav{flex-shrink:0;scrollbar-width:thin;overscroll-behavior-x:contain}
+ .command-nav button{min-height:40px}
+ .app-shell .chat-main{min-width:0}
+ .missions-view,.group-chats-view,.office-view,.command-center,.gallery-scroll{min-width:0;min-height:0}
+ .missions-heading,.mission-detail-head,.project-row,.group-transcript-head{flex-wrap:wrap}
+ .mission-detail,.mission-form,.mission-empty,.group-chat-controls,.group-transcript{padding:14px}
+ .mission-form fieldset,.lab-view fieldset{min-width:0}
+ .modal{padding:20px;max-height:calc(100dvh - 20px)}
+ .overlay{padding:10px}
+ .modal input,.modal textarea,.modal select,.settings-body input,.settings-body textarea,.settings-body select{max-width:100%;min-width:0}
+ .editor-grid{grid-template-columns:minmax(0,1fr)}
+ .profile-row{flex-wrap:wrap}.profile-row input,.profile-row select{min-width:0;flex:1 1 130px}
+ .mission-cost{gap:8px;flex-wrap:wrap}
+ .project-row>div,.group-chat-create>div>*{min-width:0}
+ .desktop-inputs input,.desktop-inputs select{width:100%}
+}
