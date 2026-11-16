@@ -27,6 +27,36 @@ class PresetError(ValueError):
     pass
 
 
+def _level_for(title):
+    t = title.lower()
+    if t.startswith('senior '):
+        return 'senior'
+    if 'director' in t or t.startswith('chief '):
+        return 'lead'
+    return 'mid'
+
+
+def from_pack_role(raw):
+    """Map one role from the 'Funk Bot Employee DNA Role Pack' interchange format to a preset.
+
+    Presets already in native form pass through untouched. Policy text from the pack is
+    preserved verbatim (permission_policy -> permission_boundaries, cost/governance ->
+    resource_policy) rather than dropped.
+    """
+    if not isinstance(raw, dict) or 'system_instructions' not in raw or 'instructions' in raw:
+        return raw
+    title = raw.get('title') if isinstance(raw.get('title'), str) else ''
+    policy = {k: raw[k] for k in ('cost_policy', 'governance') if isinstance(raw.get(k), str)}
+    out = {'id': raw.get('id'), 'title': title, 'department': raw.get('department', ''),
+           'job_description': raw.get('job_description', ''), 'personality': raw.get('personality', ''),
+           'instructions': raw['system_instructions'], 'level': _level_for(title),
+           'model_tier': str(raw.get('resource_tier_recommendation', 'Standard')).upper(),
+           'resource_policy': policy}
+    if isinstance(raw.get('permission_policy'), str) and raw['permission_policy'].strip():
+        out['permission_boundaries'] = [raw['permission_policy'].strip()]
+    return out
+
+
 def _clean_list(name, value):
     if value is None:
         return []
@@ -88,6 +118,7 @@ def import_presets(c, raw_presets, *, overwrite_customized=False, source='import
         raise PresetError(f'At most {MAX_PRESETS_PER_IMPORT} presets per import.')
     results, seen = [], set()
     for raw in raw_presets:
+        raw = from_pack_role(raw)
         pid = raw.get('id') if isinstance(raw, dict) else None
         try:
             preset = validate_preset(raw)

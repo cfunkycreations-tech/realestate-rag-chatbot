@@ -10,6 +10,9 @@ describe('role pack helpers', () => {
     expect(readPack('[{"id":"editor"}]')).toHaveLength(1);
     expect(readPack('{"format":"funkbot-role-pack","presets":[{"id":"a"},{"id":"b"}]}')).toHaveLength(2);
   });
+  it('reads the Employee DNA interchange pack (roles list)', () => {
+    expect(readPack('{"format":"pack","roles":[{"id":"funk-role-01-editor"}]}')).toHaveLength(1);
+  });
   it('rejects files without presets', () => {
     expect(() => readPack('{"roles":[]}')).toThrow(/no role presets/);
     expect(() => readPack('[]')).toThrow(/no role presets/);

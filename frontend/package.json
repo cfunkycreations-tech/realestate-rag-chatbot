@@ -12,6 +12,7 @@
     "test:e2e": "node scripts/team-e2e.mjs",
     "test:identity": "node scripts/identity-e2e.mjs",
     "test:career": "node scripts/career-e2e.mjs",
+    "test:role-pack": "node scripts/role-pack-e2e.mjs",
     "test:visual": "node scripts/visual-pass-e2e.mjs",
     "test:banner": "node scripts/banner-e2e.mjs",
     "test:budget": "node scripts/budget-e2e.mjs",

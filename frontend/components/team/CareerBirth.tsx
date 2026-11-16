@@ -25,11 +25,11 @@ export function summarize(results:Outcome[]){
   const parts=[[count('created'),'added'],[count('new_version'),'updated'],[count('unchanged'),'unchanged'],[count('skipped_customized'),'kept (your edits)'],[count('invalid'),'invalid']] as const;
   return parts.filter(([n])=>n>0).map(([n,label])=>`${n} ${label}`).join(' · ')||'Nothing to import.';
 }
-/** Accepts a bare list of presets or an exported pack ({presets:[...]}). */
+/** Accepts a bare list, an exported pack ({presets:[...]}) or the Employee DNA interchange pack ({roles:[...]}). */
 export function readPack(text:string):unknown[]{
   const data=JSON.parse(text);
-  const list=Array.isArray(data)?data:data&&Array.isArray(data.presets)?data.presets:null;
-  if(!list||!list.length)throw new Error('This file has no role presets. Expected a list, or an object with a "presets" list.');
+  const list=Array.isArray(data)?data:data&&Array.isArray(data.presets)?data.presets:data&&Array.isArray(data.roles)?data.roles:null;
+  if(!list||!list.length)throw new Error('This file has no role presets. Expected a list, or an object with a "presets" or "roles" list.');
   return list;
 }
 const label=(value:string)=>value.charAt(0).toUpperCase()+value.slice(1).toLowerCase();

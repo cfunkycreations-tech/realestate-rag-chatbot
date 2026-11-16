@@ -131,3 +131,22 @@ def test_duplicate_keeps_career_and_delete_removes_career_rows():
             assert c.execute('SELECT count(*) FROM bot_careers WHERE bot_id=?', (born['id'],)).fetchone()[0] == 0
             assert c.execute('SELECT count(*) FROM career_history WHERE bot_id=?', (born['id'],)).fetchone()[0] == 0
             assert c.execute('SELECT count(*) FROM bot_careers WHERE bot_id=?', (copy['id'],)).fetchone()[0] == 1
+
+
+def test_real_59_role_pack_imports_directly_and_hires():
+    import json
+    from pathlib import Path
+    pack = json.loads((Path(__file__).parent / 'fixtures' / 'employee-dna-role-pack.json').read_text(encoding='utf-8'))
+    with TestClient(service.app) as client:
+        setup(client)
+        r = client.post('/api/role-presets/import', json={'presets': pack['roles']}).json()
+        assert r['summary'] == {'created': 59}
+        presets = {p['id']: p for p in client.get('/api/role-presets').json()}
+        assert len(presets) == 59
+        arch = presets['funk-role-10-senior-software-architect'] if 'funk-role-10-senior-software-architect' in presets else next(p for p in presets.values() if p['title'] == 'Senior Software Architect')
+        assert arch['level'] == 'senior' and arch['model_tier'] == 'ADVANCED' and len(arch['instructions']) > 300
+        assert arch['resource_policy']['cost_policy'] and arch['permission_boundaries']
+        assert {p['model_tier'] for p in presets.values()} == {'LIGHT', 'STANDARD', 'ADVANCED', 'RESEARCH'}
+        assert client.post('/api/role-presets/import', json={'presets': pack['roles']}).json()['summary'] == {'unchanged': 59}
+        born = client.post('/api/bots/birth', json={'mode': 'choose', 'preset_id': arch['id']}).json()
+        assert born['career']['career']['title'] == 'Senior Software Architect'
