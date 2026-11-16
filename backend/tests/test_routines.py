@@ -121,12 +121,12 @@ def test_repeated_similar_work_model_drafts_owner_approved_routine(monkeypatch):
     class Recording(FakeClient):
         def stream(self,*args,**kwargs): payloads.append(kwargs['json']);return super().stream(*args,**kwargs)
     monkeypatch.setattr(service.httpx,'AsyncClient',Recording)
-    FakeClient.responses=[response('{"title":"Weekly report summary","instructions":"Read and summarize the report for the owner."}')]
+    FakeClient.responses=[response('{"similar":true,"title":"Weekly report summary","instructions":"Read and summarize the report for the owner."}')]
     with TestClient(service.app) as c:
         setup(c);configure_budget(c);bot=c.post('/api/bots',json={'name':'Observer'}).json()['id']
         with service.db() as db:
             from funkbot.learned_routines import discover
-            texts=['Summarize the weekly report for the owner','Summarize the weekly report for my team','Summarize the weekly report for the manager']
+            texts=['Summarize the weekly report for the owner','Give my team an overview of our seven-day update','Prepare the manager’s digest of this week’s activity']
             for i,text in enumerate(texts):
                 mid='learned-'+str(i)
                 db.execute('INSERT INTO missions VALUES (?,?,?,?,?,?,?,?,?)',(mid,'Weekly report',text,None,'done','Report summarized',None,1+i,1+i))
