@@ -211,3 +211,32 @@ def test_bounded_sse_parser_handles_partial_frames_and_rejects_server_requests()
         mcp_http._SSEReply(2).feed(b'data: not-json\n\n')
     with pytest.raises(ToolError,match='Unexpected'):
         mcp_http._SSEReply(None)
+
+
+def test_real_stdio_connector_requires_individual_approval(tmp_path,monkeypatch):
+    import sys
+    marker=tmp_path/'called.txt';server=tmp_path/'server.py'
+    server.write_text('''import json,sys
+for line in sys.stdin:
+    msg=json.loads(line);method=msg.get('method')
+    if method=='initialize': result={'protocolVersion':'2025-03-26'}
+    elif method=='tools/list': result={'tools':[{'name':'send_message','inputSchema':{'type':'object'}}]}
+    elif method=='tools/call':
+        open(sys.argv[1],'w').write(msg['params']['arguments']['text'])
+        result={'content':[{'type':'text','text':'sent'}]}
+    else: continue
+    print(json.dumps({'jsonrpc':'2.0','id':msg['id'],'result':result}),flush=True)
+''')
+    monkeypatch.setattr(service.httpx,'AsyncClient',FakeClient)
+    with TestClient(service.app) as c:
+        setup(c);configure_budget(c);bot=c.post('/api/bots',json={'name':'Scout'}).json()['id']
+        body={'name':'Local fixture','transport':'stdio','command':sys.executable,'arguments':[str(server),str(marker)],'enabled':True,'allowed_tools':['send_message']}
+        connector=c.put('/api/connectors/new',json=body).json()['id']
+        assert c.post(f'/api/connectors/{connector}/test').json()['tools'][0]['name']=='send_message'
+        assert not marker.exists()
+        FakeClient.responses=[call_reply(connector,args=json.dumps({'text':'hello'})),final_reply()]
+        run=c.post(f'/api/bots/{bot}/chat',json={'content':'Use local connector'}).json()['job_id']
+        call=until_calls(c,run)[0]
+        assert call['status']=='pending' and call['arguments']['endpoint'].startswith('stdio:') and not marker.exists()
+        assert c.post(f'/api/jobs/{run}/tool-calls/{call["id"]}/decision',json={'decision':'approve_once'}).status_code==200
+        assert get_events(c,run)[-1]['type']=='done' and marker.read_text()=='hello'

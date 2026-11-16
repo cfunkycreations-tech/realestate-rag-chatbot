@@ -49,7 +49,7 @@ from funkbot.budget import BudgetError, NANOS_PER_DOLLAR, dollars_to_nanos, limi
 from funkbot.tool_policy import WebPolicy
 from funkbot import browser_network, computer, computer_snapshot
 from funkbot.tools import ToolError, McpCallArgs
-from funkbot import mcp_http, tools, inbox
+from funkbot import mcp_http, mcp_stdio, tools, inbox
 from funkbot.tool_audit import abort as abort_tool
 from funkbot.tool_runtime import ToolContext
 from funkbot.tool_bridge import ToolBridge
@@ -1146,7 +1146,10 @@ def save_search_provider(body: SearchProviderIn,request: Request):
 
 class ConnectorIn(BaseModel):
     name: str = Field(min_length=1,max_length=100)
-    url: str = Field(min_length=1,max_length=2048)
+    url: str = Field(default='',max_length=2048)
+    transport: Literal['http','stdio'] = 'http'
+    command: str = Field(default='',max_length=512)
+    arguments: list[str] = Field(default_factory=list,max_length=30)
     key: str | None = Field(default=None,max_length=4096)
     clear_key: bool = False
     enabled: bool = False
@@ -1170,6 +1173,7 @@ def connector_catalog(c):
 
 async def execute_connector(connector,args: McpCallArgs):
     try:
+        if connector.get('transport')=='stdio': return await mcp_stdio.call_tool(connector['command'],connector['arguments'],args.tool_name,json.loads(args.arguments_json))
         token=cipher.decrypt(connector['key'].encode()).decode() if connector.get('key') else ''
         return await mcp_http.call_tool(connector['url'],token,args.tool_name,json.loads(args.arguments_json))
     except (ValueError,KeyError,TypeError,InvalidToken) as exc:
@@ -1183,7 +1187,7 @@ def list_connectors(request: Request):
     with db() as c:
         row=c.execute("SELECT value FROM config WHERE key='mcp_connectors'").fetchone()
         values=json.loads(row['value']) if row else {}
-    return [{'id':key,'name':item['name'],'url':item['url'],'enabled':item['enabled'],'allowed_tools':item['allowed_tools'],'has_key':bool(item.get('key'))} for key,item in values.items()]
+    return [{'id':key,'name':item['name'],'url':item['url'],'enabled':item['enabled'],'allowed_tools':item['allowed_tools'],'has_key':bool(item.get('key')),'transport':item.get('transport','http'),'command':item.get('command',''),'arguments':item.get('arguments',[])} for key,item in values.items()]
 
 
 @app.put('/api/connectors/{connector_id}')
@@ -1193,12 +1197,19 @@ def save_connector(connector_id: str, body: ConnectorIn, request: Request):
         try:
             if str(uuid.UUID(connector_id))!=connector_id: raise ValueError()
         except ValueError: raise HTTPException(400,'Invalid connector ID.')
-    try: mcp_http.validate_endpoint(body.url)
-    except ToolError as exc: raise HTTPException(400,str(exc)) from exc
+    if body.transport=='http':
+        try: mcp_http.validate_endpoint(body.url)
+        except ToolError as exc: raise HTTPException(400,str(exc)) from exc
+        endpoint=body.url
+    else:
+        if not body.command.strip() or any('\x00' in x or len(x)>512 for x in [body.command,*body.arguments]): raise HTTPException(400,'Enter a valid local command and arguments.')
+        if body.key: raise HTTPException(400,'Local connectors do not accept bearer tokens.')
+        endpoint='stdio:'+json.dumps([body.command,*body.arguments],ensure_ascii=True,separators=(',',':'))
+        if len(endpoint)>2048: raise HTTPException(400,'Local command is too long.')
     if not body.name.strip() or any(not re.fullmatch(r'[A-Za-z0-9_.:-]{1,128}',tool) for tool in body.allowed_tools) or len(set(body.allowed_tools))!=len(body.allowed_tools): raise HTTPException(400,'Enter a name and distinct valid tool names.')
     if body.key and any(ord(ch)<33 or ord(ch)>126 for ch in body.key): raise HTTPException(400,'Connector token must use visible ASCII characters.')
     keys=configured_secrets()
-    if any(secret and secret in body.url for secret in [*keys,body.key]): raise HTTPException(400,'Do not put credentials in a connector URL.')
+    if any(secret and secret in endpoint for secret in [*keys,body.key]): raise HTTPException(400,'Do not put credentials in a connector URL.')
     name=redact_text(body.name.strip(),keys)
     with db() as c:
         c.execute('BEGIN IMMEDIATE')
@@ -1210,10 +1221,10 @@ def save_connector(connector_id: str, body: ConnectorIn, request: Request):
         else:
             old=values.get(connector_id)
             if old is None: raise HTTPException(404,'Connector not found.')
-        if old.get('key') and old.get('url')!=body.url and not body.key and not body.clear_key: raise HTTPException(400,'Changing the endpoint requires replacing or clearing its saved token.')
+        if old.get('key') and old.get('url')!=endpoint and not body.key and not body.clear_key: raise HTTPException(400,'Changing the endpoint requires replacing or clearing its saved token.')
         # A credential is never returned to the caller or put into tool arguments.
         key='' if body.clear_key else cipher.encrypt(body.key.encode()).decode() if body.key else old.get('key','')
-        values[connector_id]={'name':name,'url':body.url,'key':key,'enabled':body.enabled,'allowed_tools':body.allowed_tools,'revision':uuid.uuid4().hex}
+        values[connector_id]={'name':name,'url':endpoint,'key':key,'enabled':body.enabled,'allowed_tools':body.allowed_tools,'revision':uuid.uuid4().hex,'transport':body.transport,'command':body.command if body.transport=='stdio' else '', 'arguments':body.arguments if body.transport=='stdio' else []}
         c.execute("INSERT OR REPLACE INTO config VALUES ('mcp_connectors',?)",(json.dumps(values),))
     return {'id':connector_id}
 
@@ -1236,7 +1247,7 @@ async def test_connector(connector_id: str,request: Request):
     if not connector: raise HTTPException(404,'Connector not found.')
     try:
         token=cipher.decrypt(connector['key'].encode()).decode() if connector.get('key') else ''
-        tools=await mcp_http.list_tools(connector['url'],token)
+        tools=await mcp_stdio.list_tools(connector['command'],connector['arguments']) if connector.get('transport')=='stdio' else await mcp_http.list_tools(connector['url'],token)
     except ToolError as exc: raise HTTPException(400,redact(str(exc))) from exc
     except Exception as exc: raise HTTPException(400,'Connector credentials or connection could not be used.') from exc
     keys=configured_secrets()
