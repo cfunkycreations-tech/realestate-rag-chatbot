@@ -150,3 +150,59 @@ def test_real_59_role_pack_imports_directly_and_hires():
         assert client.post('/api/role-presets/import', json={'presets': pack['roles']}).json()['summary'] == {'unchanged': 59}
         born = client.post('/api/bots/birth', json={'mode': 'choose', 'preset_id': arch['id']}).json()
         assert born['career']['career']['title'] == 'Senior Software Architect'
+
+
+def _v2(name):
+    import json
+    from pathlib import Path
+    return json.loads((Path(__file__).parent / 'fixtures' / name).read_text(encoding='utf-8'))
+
+
+def test_v2_extended_pack_maps_structured_fields_without_granting_anything():
+    ext = _v2('employee-dna-v2-extended.json')['roles']
+    with TestClient(service.app) as client:
+        setup(client)
+        assert client.post('/api/role-presets/import', json={'presets': ext}).json()['summary'] == {'created': 59}
+        presets = {p['id']: p for p in client.get('/api/role-presets').json()}
+        ed = presets['funk-role-01-editor']
+        assert ed['responsibilities'][0].startswith('Perform substantive') and len(ed['responsibilities']) == 4
+        assert ed['career_path'] == ['Assistant Editor', 'Editor', 'Senior Editor', 'Editorial Director']
+        assert ed['expected_outputs'] == ['clean final draft', 'editorial change log', 'unresolved fact-check notes']
+        assert ed['tools'] and ed['model_tier'] == 'LIGHT' and ed['level'] == 'mid'
+        assert any(b.startswith('May suggest revisions') for b in ed['permission_boundaries'])
+        assert ed['resource_policy']['success_criteria'].startswith('Meaning preserved')
+        assert {p['level'] for p in presets.values()} == {'mid', 'senior', 'lead'}
+        assert {p['model_tier'] for p in presets.values()} == {'LIGHT', 'STANDARD', 'ADVANCED', 'RESEARCH'}
+        assert client.post('/api/role-presets/import', json={'presets': ext}).json()['summary'] == {'unchanged': 59}
+        # hiring from a role must not change spending or security settings
+        before = client.get('/api/budget').json()
+        born = client.post('/api/bots/birth', json={'mode': 'choose', 'preset_id': 'funk-role-01-editor'}).json()
+        assert born['career']['career']['title'] == 'Editor'
+        assert client.get('/api/budget').json()['account'] == before['account']
+
+
+def test_v2_extended_upgrades_import_pack_in_place_and_keeps_owner_edits():
+    imp, ext = _v2('employee-dna-v2-import.json'), _v2('employee-dna-v2-extended.json')['roles']
+    imp = next(v for v in imp.values() if isinstance(v, list))
+    with TestClient(service.app) as client:
+        setup(client)
+        assert client.post('/api/role-presets/import', json={'presets': imp}).json()['summary'] == {'created': 59}
+        first = {p['id']: p for p in client.get('/api/role-presets').json()}
+        assert first['funk-role-01-editor']['career_path'] == []
+        mine = {k: v for k, v in first['funk-role-02-copywriter' if 'funk-role-02-copywriter' in first else sorted(first)[1]].items() if k not in ('version', 'status', 'customized')}
+        target = mine['id']
+        assert client.put(f'/api/role-presets/{target}', json={**mine, 'job_description': 'OWNER EDIT'}).status_code == 200
+        summary = client.post('/api/role-presets/import', json={'presets': ext}).json()['summary']
+        assert summary.get('skipped_customized') == 1 and summary.get('new_version') == 58
+        after = {p['id']: p for p in client.get('/api/role-presets').json()}
+        assert after[target]['job_description'] == 'OWNER EDIT'
+        assert after['funk-role-01-editor']['version'] == 2 and after['funk-role-01-editor']['career_path']
+
+
+def test_v2_extended_bad_role_is_reported_not_fatal():
+    ext = _v2('employee-dna-v2-extended.json')['roles']
+    bad = {**ext[1], 'role_id': 'Bad ID!'}
+    with TestClient(service.app) as client:
+        setup(client)
+        s = client.post('/api/role-presets/import', json={'presets': [ext[0], bad]}).json()['summary']
+        assert s == {'created': 1, 'invalid': 1}

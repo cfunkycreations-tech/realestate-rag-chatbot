@@ -45,6 +45,8 @@ def from_pack_role(raw):
     """
     if not isinstance(raw, dict) or 'system_instructions' not in raw or 'instructions' in raw:
         return raw
+    if 'role_id' in raw and 'id' not in raw:
+        return from_extended_role(raw)
     title = raw.get('title') if isinstance(raw.get('title'), str) else ''
     policy = {k: raw[k] for k in ('cost_policy', 'governance') if isinstance(raw.get(k), str)}
     out = {'id': raw.get('id'), 'title': title, 'department': raw.get('department', ''),
@@ -54,6 +56,35 @@ def from_pack_role(raw):
            'resource_policy': policy}
     if isinstance(raw.get('permission_policy'), str) and raw['permission_policy'].strip():
         out['permission_boundaries'] = [raw['permission_policy'].strip()]
+    return out
+
+
+def from_extended_role(raw):
+    """Map one role of the 'Employee DNA v2 Extended' schema to a preset.
+
+    Descriptive metadata only: `tools` is a recommendation list and `career_level` is a label.
+    Nothing here grants a permission, a tool, a budget or a spending limit; the preset fields
+    that mean something to enforcement (model tier -> existing Economy policy) are unchanged
+    in kind. Unknown or malformed extras are left for validate_preset to reject per role.
+    """
+    def text_list(v):
+        return [v.strip()] if isinstance(v, str) and v.strip() else (v if isinstance(v, list) else None)
+
+    out = from_pack_role({**{k: v for k, v in raw.items() if k != 'role_id'}, 'id': raw['role_id']})
+    if isinstance(raw.get('recommended_resource_tier'), str):
+        out['model_tier'] = raw['recommended_resource_tier'].upper()
+    level = raw.get('career_level')
+    if isinstance(level, str) and level.lower() in LEVELS:
+        out['level'] = level.lower()
+    for src, dst in (('responsibilities', 'responsibilities'), ('competencies', 'competencies'),
+                     ('deliverables', 'expected_outputs'), ('tools', 'tools'), ('career_path', 'career_path'),
+                     ('collaboration', 'collaboration')):
+        if src in raw:
+            out[dst] = text_list(raw[src])
+    if isinstance(raw.get('role_boundary'), str) and raw['role_boundary'].strip():
+        out['permission_boundaries'] = [*out.get('permission_boundaries', []), raw['role_boundary'].strip()]
+    if isinstance(raw.get('success_criteria'), str) and raw['success_criteria'].strip():
+        out['resource_policy'] = {**out['resource_policy'], 'success_criteria': raw['success_criteria'].strip()}
     return out
 
 
