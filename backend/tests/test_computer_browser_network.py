@@ -97,3 +97,15 @@ def test_kill_switch_pauses_work_and_requests_out_of_band_exit(monkeypatch):
         assert client.post('/api/control/computer/kill',json={'run_id':'old'}).status_code==409
         assert client.post('/api/control/computer/kill',json={'run_id':'run'}).json()=={'paused':True,'kill_requested':True}
         assert client.get('/api/control/pause').json()=={'paused':True} and sent==[True]
+
+
+def test_kill_switch_signals_worker_even_without_active_backend_request(monkeypatch):
+    sent=[]
+    async def kill(): sent.append(True);return False
+    monkeypatch.setattr(computer,'request_container_kill',kill)
+    monkeypatch.setattr(computer,'_active',None)
+    with TestClient(service.app) as client:
+        assert client.post('/api/control/computer/kill',json={}).status_code==401
+        setup(client)
+        assert client.post('/api/control/computer/kill',json={}).json()=={'paused':True,'kill_requested':False}
+        assert client.get('/api/control/pause').json()=={'paused':True} and sent==[True]

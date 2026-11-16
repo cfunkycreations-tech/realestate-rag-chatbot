@@ -3626,11 +3626,19 @@ async def stop_computer(body: ComputerStopIn,request: Request):
     return {'requested':False}
 
 
+class ComputerKillIn(BaseModel):
+    model_config=ConfigDict(extra='forbid')
+    # Optional stale-request guard for callers targeting one specific run.
+    # An untargeted emergency kill remains available even if backend status
+    # has lost track of a still-running worker.
+    run_id: str | None = Field(default=None,min_length=1,max_length=128)
+
+
 @app.post('/api/control/computer/kill')
-async def kill_computer(body: ComputerStopIn,request: Request):
+async def kill_computer(body: ComputerKillIn,request: Request):
     require_auth(request)
     active=computer.active_info()
-    if not active or active['run_id']!=body.run_id: raise HTTPException(409,'This computer request is no longer active.')
+    if body.run_id is not None and (not active or active['run_id']!=body.run_id): raise HTTPException(409,'This computer request is no longer active.')
     # Block new work before signalling the worker; do not expose a Docker socket.
     with db() as c:
         c.execute('BEGIN IMMEDIATE');c.execute('INSERT OR REPLACE INTO config VALUES (?,?)',('global_pause','1'))
