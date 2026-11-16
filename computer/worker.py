@@ -144,20 +144,20 @@ def desktop_input(event):
     except (OSError,subprocess.TimeoutExpired): pass
 
 
+FRAME_ERROR=['']
+
+
 def desktop_frame():
-    # Capture as the same unprivileged user as the display, with no shell.
-    env={'DISPLAY':':99','PATH':'/usr/bin:/bin','HOME':'/tmp'}
+    # ImageMagick's `import` captures the X root window directly (no xwd package
+    # needed), as the same unprivileged user as the display, with no shell.
+    env={'DISPLAY':':99','PATH':'/usr/bin:/bin','HOME':'/tmp','TMPDIR':'/tmp','OMP_NUM_THREADS':'1','MAGICK_THREAD_LIMIT':'1'}
     try:
-        xwd=subprocess.Popen(['xwd','-root','-silent'],env=env,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,preexec_fn=drop_privileges)
-        try:
-            image=subprocess.run(['convert','xwd:-','png:-'],env=env,stdin=xwd.stdout,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,preexec_fn=drop_privileges,timeout=2,check=False)
-        finally:
-            xwd.stdout.close()
-            try: xwd.wait(timeout=1)
-            except subprocess.TimeoutExpired: xwd.kill();xwd.wait()
+        image=subprocess.run(['import','-silent','-window','root','png:-'],env=env,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,preexec_fn=drop_privileges,timeout=8,check=False)
         if image.returncode==0 and len(image.stdout)<=1024*1024 and image.stdout.startswith(b'\x89PNG\r\n\x1a\n'):
             return image.stdout
-    except (OSError,subprocess.TimeoutExpired): pass
+        FRAME_ERROR[0]='rc=%s bytes=%d err=%s'%(image.returncode,len(image.stdout),image.stderr[-200:].decode('utf-8','replace').replace('\n',' '))
+    except (OSError,subprocess.TimeoutExpired) as exc:
+        FRAME_ERROR[0]=type(exc).__name__+': '+str(exc)[:150]
     return None
 
 
@@ -294,13 +294,16 @@ def browser_reply(browser,timeout):
 
 def serve_session(conn,workspace):
     """Keep one browser and desktop alive across actions, never across clients."""
-    browser=None;proxy_pid=None;graceful=False
+    browser=None;proxy_pid=None;graceful=False;failure=''
+    browser_err=tempfile.NamedTemporaryFile(prefix='browser-err-',dir='/tmp')
+    os.chmod(browser_err.name,0o666)
     try:
         restore_as_user(workspace);start_desktop(conn)
         proxy_port,proxy_pid=start_browser_proxy()
-        browser=subprocess.Popen(['python','-u','/session_browser.py'],cwd=WORKSPACE,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,env={'PATH':'/usr/local/bin:/usr/bin:/bin','HOME':'/tmp','TMPDIR':'/tmp','DISPLAY':':99','PYTHONUNBUFFERED':'1','FUNK_BROWSER_PROXY_PORT':str(proxy_port)},preexec_fn=drop_desktop_privileges,start_new_session=True)
-        ready,_,_=select.select([browser.stdout],[],[],20)
-        if not ready or json.loads(browser.stdout.readline(4096))!={'ready':True}: raise RuntimeError('Browser failed to start.')
+        browser=subprocess.Popen(['python','-u','/session_browser.py'],cwd=WORKSPACE,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=browser_err,env={'PATH':'/usr/local/bin:/usr/bin:/bin','HOME':'/tmp','TMPDIR':'/tmp','DISPLAY':':99','PYTHONUNBUFFERED':'1','FUNK_BROWSER_PROXY_PORT':str(proxy_port)},preexec_fn=drop_desktop_privileges,start_new_session=True)
+        launch_started=time.monotonic()
+        ready,_,_=select.select([browser.stdout],[],[],40)
+        if not ready or json.loads(browser.stdout.readline(4096))!={'ready':True}: raise RuntimeError('Browser failed to start (waited %.0fs, exit=%s).'%(time.monotonic()-launch_started,browser.poll()))
         session_send(conn,{'session':'started'})
         start=last_activity=time.monotonic();next_frame=start;incoming=b'';takeover=False
         while True:
@@ -330,7 +333,7 @@ def serve_session(conn,workspace):
                         response=browser_reply(browser,15)
                         frame=desktop_frame()
                         if frame: response['frame']=base64.b64encode(frame).decode('ascii')
-                        elif response['ok']: response={'ok':False,'error':'Action may have run, but desktop capture failed; do not retry without review.'}
+                        elif response['ok']: response={'ok':False,'error':'Action may have run, but desktop capture failed; do not retry without review. ['+FRAME_ERROR[0]+']'}
                         session_send(conn,{'id':message['id'],**response})
                     else: raise RuntimeError('Invalid session request.')
                 if graceful: break
@@ -343,8 +346,12 @@ def serve_session(conn,workspace):
     except CommandCancelled:
         try: stop_unprivileged_processes()
         except Exception: pass
-    except Exception:
-        try: session_send(conn,{'error':'Desktop session failed; actions may have run and the previous workspace was retained.'})
+    except Exception as exc:
+        try:
+            browser_err.seek(0);tail=browser_err.read()[-400:].decode('utf-8','replace')
+        except OSError: tail=''
+        failure=(' Detail: '+type(exc).__name__+': '+str(exc)[:150]+' | '+tail).replace('\n',' ')[:600]
+        try: session_send(conn,{'error':'Desktop session failed; actions may have run and the previous workspace was retained.'+failure})
         except OSError: pass
     stop_browser_proxy(proxy_pid)
     # PID 1 exits after return; the private namespace is discarded.

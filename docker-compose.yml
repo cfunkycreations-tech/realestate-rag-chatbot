@@ -7,6 +7,7 @@ services:
     depends_on: [backend]
   backend:
     build: ./backend
+    restart: unless-stopped
     volumes: ["funk_data:/data", "computer_control:/computer-control"]
     environment:
       FUNK_DATA_DIR: ${FUNK_DATA_DIR:-/data}
@@ -29,9 +30,9 @@ services:
     cap_drop: [ALL]
     cap_add: [SETUID, SETGID, KILL]
     security_opt: ["no-new-privileges:true"]
-    pids_limit: 128
-    mem_limit: 512m
-    cpus: 1.0
+    pids_limit: 512
+    mem_limit: 1024m
+    cpus: 2.0
     tmpfs:
       - /tmp:size=128m,mode=1777,nosuid,nodev
       - /workspace:size=128m,mode=1777,nosuid,nodev

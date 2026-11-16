@@ -59,7 +59,7 @@ def inspect_png(data):
         raise VaultError('Invalid PNG') from exc
 
 
-def import_zip(data, connection, directory: Path, redaction_keys: list[str] | None = None, collection: str = ""):
+def import_zip(data, connection, directory: Path, redaction_keys: list[str] | None = None, collection: str = "", pack_id: str | None = None):
     if len(data) > MAX_ARCHIVE:
         raise VaultError('ZIP is too large (maximum 20 MB).')
     try:
@@ -110,6 +110,8 @@ def import_zip(data, connection, directory: Path, redaction_keys: list[str] | No
                 created.append(target)
                 connection.execute('INSERT INTO characters VALUES (?,?,?,?,?,?,?,?,?,?)',
                                    (character_id,digest,item['name'],normalized,item['role'],json.dumps(item['tags']),item['notes'],item['rarity'],0,time.time()))
+                if pack_id:
+                    connection.execute('INSERT INTO pack_characters VALUES (?,?)', (character_id, pack_id))
                 added += 1
         except BaseException:
             for target in created:

@@ -41,7 +41,9 @@ def test_slicer_import_hidden_assets_and_no_repeat_draw():
         assert old['character'] is None
         result=client.post('/api/vault/import',files={'file':('input.zip',data,'application/zip')})
         assert result.status_code == 200 and result.json()=={'added':15,'duplicates':0,'invalid':0}
-        assert client.post('/api/vault/import',files={'file':('input.zip',data,'application/zip')}).json()['duplicates']==15
+        again=client.post('/api/vault/import',files={'file':('input.zip',data,'application/zip')})
+        assert again.status_code==409 and 'already uploaded' in again.json()['detail']
+        assert client.get('/api/vault/status').json()['total']==15
         public=client.get('/api/vault/status').text+client.get('/api/bots').text
         assert all(name not in public for name in names)
         assert client.get(f"/api/bots/{old['id']}/avatar").status_code==404
@@ -125,3 +127,55 @@ def test_existing_vault_metadata_is_redacted_when_key_saved_later():
         assert bot['character']['name']==secret
         client.put('/api/settings/gateways/openrouter',json={'url':'https://openrouter.ai/api/v1','key':secret})
         assert secret not in client.get('/api/bots').text
+
+
+def test_packs_listed_blocked_when_repeated_and_removable():
+    first=archive([(f'a{i}.png',png(f'PackA{i}')) for i in range(3)])
+    second=archive([(f'b{i}.png',png(f'PackB{i}')) for i in range(2)])
+    with TestClient(service.app) as client:
+        assert client.get('/api/vault/packs').status_code==401
+        setup(client)
+        assert client.get('/api/vault/packs').json()==[]
+        r=client.post('/api/vault/import',files={'file':('heroes.zip',first,'application/zip')})
+        assert r.status_code==200 and r.json()['added']==3 and client.get('/api/vault/packs').json()[0]['name']=='heroes'
+        # Same ZIP, even under another file name or collection label, is blocked.
+        blocked=client.post('/api/vault/import',files={'file':('renamed.zip',first,'application/zip')},data={'collection':'Other'})
+        assert blocked.status_code==409 and '"heroes"' in blocked.json()['detail']
+        # A different ZIP reusing an existing pack name is blocked too.
+        clash=client.post('/api/vault/import',files={'file':('x.zip',second,'application/zip')},data={'collection':'HEROES'})
+        assert clash.status_code==409 and 'already exists' in clash.json()['detail']
+        ok=client.post('/api/vault/import',files={'file':('villains.zip',second,'application/zip')},data={'collection':'Villains'})
+        assert ok.status_code==200
+        packs=client.get('/api/vault/packs').json()
+        assert [p['name'] for p in packs]==['Villains','heroes']
+        assert [p['characters'] for p in packs]==[2,3] and all(p['in_use']==0 for p in packs)
+        assert 'PackA0' not in client.get('/api/vault/packs').text  # characters stay hidden
+        assert client.get('/api/vault/status').json()['total']==5
+        # A ZIP whose characters all exist already adds nothing and records no pack.
+        repack=archive([(f'z{i}.png',png(f'PackA{i}')) for i in range(3)])
+        none=client.post('/api/vault/import',files={'file':('again.zip',repack,'application/zip')})
+        assert none.status_code==409 and 'Nothing new' in none.json()['detail']
+        assert len(client.get('/api/vault/packs').json())==2
+        hero=next(p for p in packs if p['name']=='heroes')
+        removed=client.delete('/api/vault/packs/'+hero['id'])
+        assert removed.json()=={'removed':3,'kept_in_use':0}
+        assert client.get('/api/vault/status').json()['total']==2
+        assert client.delete('/api/vault/packs/'+hero['id']).status_code==404
+        # Removing a pack frees it for upload again.
+        assert client.post('/api/vault/import',files={'file':('heroes.zip',first,'application/zip')}).json()['added']==3
+
+
+def test_removing_pack_keeps_characters_assigned_to_bots(tmp_path):
+    data=archive([('one.png',png('OnlyOne')),('two.png',png('Second'))])
+    with TestClient(service.app) as client:
+        setup(client)
+        assert client.post('/api/vault/import',files={'file':('duo.zip',data,'application/zip')}).status_code==200
+        pack=client.get('/api/vault/packs').json()[0]
+        bot=client.post('/api/bots',json={'name':'Worker'}).json()
+        listed=client.get('/api/vault/packs').json()[0]
+        assert listed['in_use']==1 and listed['available']==1
+        result=client.delete('/api/vault/packs/'+pack['id']).json()
+        assert result=={'removed':1,'kept_in_use':1}
+        assert client.get(bot['character']['avatar_url']).status_code==200
+        status=client.get('/api/vault/status').json()
+        assert status['total']==1 and status['unpacked']==1

@@ -67,7 +67,7 @@ def main():
     os.environ.setdefault('HOME','/tmp')
     with sync_playwright() as playwright:
         proxy_port=int(os.environ['FUNK_BROWSER_PROXY_PORT'])
-        browser=playwright.chromium.launch(executable_path='/usr/bin/chromium',headless=False,args=['--no-sandbox','--disable-dev-shm-usage','--disable-background-networking','--disable-quic','--disable-http2','--no-first-run',f'--proxy-server=http://127.0.0.1:{proxy_port}','--proxy-bypass-list=<-loopback>'])
+        browser=playwright.chromium.launch(executable_path='/usr/bin/chromium',headless=False,args=['--no-sandbox','--disable-dev-shm-usage','--disable-gpu','--disable-background-networking','--disable-quic','--disable-http2','--no-first-run',f'--proxy-server=http://127.0.0.1:{proxy_port}','--proxy-bypass-list=<-loopback>'])
         context=browser.new_context(viewport={'width':1024,'height':768},service_workers='block',accept_downloads=False)
         def route_request(route):
             if allowed_url(route.request.url) or urlsplit(route.request.url).scheme=='https': route.continue_()
