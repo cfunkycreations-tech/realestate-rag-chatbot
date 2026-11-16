@@ -39,7 +39,7 @@ def test_browser_actions_are_bounded_and_network_denied(monkeypatch):
     assert module.perform(page,{'type':'click','x':1,'y':2})=={}
     assert clicks==[['xdotool','mousemove','--sync','1','2','click','1']]
     with pytest.raises(ValueError): module.perform(page,{'type':'click','x':1024,'y':2})
-    with pytest.raises(ValueError,match='network access is disabled'): module.perform(page,{'type':'open_url','url':'https://example.com'})
+    with pytest.raises(ValueError): module.perform(page,{'type':'open_url','url':'http://example.com'})
 
 
 def test_session_persists_actions_and_exclusive_takeover(monkeypatch):
@@ -125,7 +125,7 @@ def test_vision_action_is_individually_approved_and_screenshot_goes_to_model(mon
     from test_live_tools import tool_reply,final_reply,until_calls,get_events
     monkeypatch.setenv('FUNK_COMPUTER_ENABLED','1');monkeypatch.setenv('FUNK_COMPUTER_DESKTOP_ENABLED','1')
     image=io.BytesIO();Image.new('RGB',(10,10),'blue').save(image,format='PNG');calls=[];captured=[]
-    async def action(ctx,revision,body): calls.append((revision,body));return {'ok':True},image.getvalue()
+    async def action(ctx,revision,body,host,domain_revision): calls.append((revision,body));return {'ok':True},image.getvalue()
     monkeypatch.setattr(computer,'desktop_action',action)
     class Client(FakeClient):
         def stream(self,*args,**kwargs): captured.append(copy.deepcopy(kwargs['json']));return super().stream(*args,**kwargs)

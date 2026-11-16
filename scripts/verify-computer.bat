@@ -96,3 +96,38 @@ assert 'proof.txt' in workspace['files']
 _, output = command('cat proof.txt', workspace)
 assert 'computer-fixture' in output
 print('PASS: worker ran unprivileged, control/socket and root were protected, no default IPv4 route, desktop frame arrived and workspace restored')
+
+print('Checking a persistent real Playwright session and exclusive takeover')
+sock, stream = connect()
+sock.settimeout(50)
+sock.sendall(json.dumps({'mode':'session','workspace':workspace}).encode()+b'\n')
+def receive():
+    while True:
+        line=stream.readline(5*1024*1024)
+        if not line: raise RuntimeError('Session disconnected unexpectedly')
+        msg=json.loads(line)
+        if set(msg)=={'frame'}: continue
+        return msg
+def send(value): sock.sendall(json.dumps(value).encode()+b'\n')
+assert receive()=={'session':'started'}, 'Playwright Chromium did not start'
+send({'type':'action','id':'one','action':{'type':'open_url','url':'about:blank'}})
+response=receive();assert response.get('ok') and response.get('frame'),response
+send({'type':'takeover','id':'take','enabled':True});assert receive().get('takeover') is True
+send({'type':'action','id':'blocked','action':{'type':'screenshot'}});assert receive().get('ok') is False
+send({'type':'takeover','id':'back','enabled':False});assert receive().get('takeover') is False
+send({'type':'action','id':'two','action':{'type':'screenshot'}});assert receive().get('ok') is True
+send({'type':'close'});result=receive();assert result.get('session')=='ended',result
+sock.close()
+print('PASS: real Playwright session persisted across actions, captured screenshots and blocked Bot actions during takeover')
+
+print('Checking the out-of-band worker kill socket')
+sock, stream=connect();sock.sendall(json.dumps({'command':'sleep 20','workspace':EMPTY}).encode()+b'\n');time.sleep(1)
+kill=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);kill.settimeout(5);kill.connect('/computer-control/computer-kill.sock');kill.sendall(b'kill\n');kill.close()
+sock.settimeout(10)
+try: ended=stream.readline()
+except (OSError,ConnectionError): ended=b''
+assert not ended, 'Worker returned a result instead of dying after kill'
+sock.close()
+_,output=command('echo RESTARTED',EMPTY)
+assert 'RESTARTED' in output
+print('PASS: kill socket interrupted the worker and Compose restarted it')

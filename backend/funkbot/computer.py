@@ -14,6 +14,7 @@ from . import computer_snapshot as snapshots
 from .tools import ToolError
 
 SOCKET='/computer-control/computer.sock'
+KILL_SOCKET='/computer-control/computer-kill.sock'
 MAX_STORED=50 * 1024 * 1024
 _lock=asyncio.Lock()  # single backend worker only
 _active=None
@@ -183,6 +184,7 @@ def _decode_frame(value):
 class DesktopSession:
     def __init__(self,context,revision,reader,writer):
         self.context=context;self.revision=revision;self.reader=reader;self.writer=writer
+        self.domains={}
         self.pending={};self.operation=asyncio.Lock();self.available=asyncio.Event();self.available.set()
         self.closed=asyncio.Event();self.task=None
 
@@ -216,6 +218,8 @@ class DesktopSession:
             for future in self.pending.values():
                 if not future.done(): future.set_exception(ToolError('Desktop session ended; an action may have run.'))
             self.pending.clear();self.available.set();self.closed.set()
+            from . import browser_network
+            browser_network.revoke()
             self.writer.close()
             _ended_sessions.add(self.context.run_id)
             if _session is self:
@@ -235,13 +239,19 @@ class DesktopSession:
             raise ToolError('Desktop request interrupted; the action may have run.') from None
         finally: self.pending.pop(identifier,None)
 
-    async def action(self,action):
+    async def action(self,action,approved_host="",domain_revision=0):
         while True:
             await self.available.wait()
             async with self.operation:
                 if self.closed.is_set(): raise ToolError('Desktop session ended.')
                 if not self.available.is_set(): continue
                 check_live(self.context,self.revision)
+                if approved_host:
+                    from . import browser_network
+                    with self.context.db() as c:
+                        p=browser_network.policy(c)
+                        if not browser_network.enabled() or p['revision']!=domain_revision or approved_host not in p['domains'] or browser_network.target(action.get('url'))!=approved_host: raise ToolError('Browser domain permission changed.')
+                    self.domains[approved_host]=domain_revision
                 response=await self.request({'type':'action','action':action})
                 if 'frame' not in response: raise ToolError('Action may have run, but no screenshot was returned.')
                 result=response.get('result',{}) if response.get('ok') else {'error':str(response.get('error','Desktop action failed.'))[:1000]}
@@ -287,9 +297,9 @@ async def get_session(context,revision):
             raise
 
 
-async def desktop_action(context,revision,action):
+async def desktop_action(context,revision,action,approved_host="",domain_revision=0):
     session=await get_session(context,revision)
-    return await session.action(action)
+    return await session.action(action,approved_host,domain_revision)
 
 
 async def set_takeover(run_id,enabled):
@@ -310,3 +320,14 @@ async def end_session(run_id,graceful):
             try: await asyncio.wait_for(session.closed.wait(),3)
             except TimeoutError: session.task.cancel()
     _ended_sessions.discard(run_id)
+
+
+async def request_container_kill():
+    writer=None
+    try:
+        _,writer=await asyncio.wait_for(asyncio.open_unix_connection(KILL_SOCKET),2)
+        writer.write(b'kill\n');await writer.drain()
+        return True
+    except (OSError,TimeoutError): return False
+    finally:
+        if writer: writer.close()

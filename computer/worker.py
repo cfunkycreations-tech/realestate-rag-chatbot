@@ -8,6 +8,7 @@ import signal
 import socket
 import subprocess
 import tempfile
+import threading
 import time
 
 import computer_snapshot as snapshot
@@ -210,6 +211,45 @@ def execute(command,conn=None,desktop=False):
 
 
 
+
+def start_browser_proxy():
+    """Bridge local Chromium proxy connections to the backend's root socket.
+
+    This process is the only network path: the container has no network other
+    than loopback, and authorization is enforced by the backend broker.
+    """
+    server=socket.socket(socket.AF_INET,socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
+    server.bind(('127.0.0.1',0));server.listen(12)
+    slots=threading.BoundedSemaphore(12)
+    def forward(client):
+        upstream=None
+        try:
+            upstream=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);upstream.settimeout(5)
+            upstream.connect('/control/browser-proxy.sock');upstream.settimeout(10);client.settimeout(10)
+            total=0;deadline=time.monotonic()+95
+            while time.monotonic()<deadline:
+                ready,_,_=select.select([client,upstream],[],[],1)
+                for src in ready:
+                    data=src.recv(32768)
+                    if not data: return
+                    total+=len(data)
+                    if total>40*1024*1024: return
+                    (upstream if src is client else client).sendall(data)
+        except OSError: pass
+        finally:
+            client.close()
+            if upstream: upstream.close()
+            slots.release()
+    def accept():
+        while True:
+            try: client,_=server.accept()
+            except OSError: return
+            if not slots.acquire(blocking=False): client.close();continue
+            threading.Thread(target=forward,args=(client,),daemon=True).start()
+    threading.Thread(target=accept,daemon=True).start()
+    return server
+
 SESSION_IDLE=120
 SESSION_HARD=600
 
@@ -230,10 +270,11 @@ def browser_reply(browser,timeout):
 
 def serve_session(conn,workspace):
     """Keep one browser and desktop alive across actions, never across clients."""
-    browser=None;graceful=False
+    browser=None;proxy=None;graceful=False
     try:
         restore_as_user(workspace);start_desktop(conn)
-        browser=subprocess.Popen(['python','-u','/session_browser.py'],cwd=WORKSPACE,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,env={'PATH':'/usr/local/bin:/usr/bin:/bin','HOME':'/tmp','TMPDIR':'/tmp','DISPLAY':':99','PYTHONUNBUFFERED':'1'},preexec_fn=drop_privileges,start_new_session=True)
+        proxy=start_browser_proxy()
+        browser=subprocess.Popen(['python','-u','/session_browser.py'],cwd=WORKSPACE,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,env={'PATH':'/usr/local/bin:/usr/bin:/bin','HOME':'/tmp','TMPDIR':'/tmp','DISPLAY':':99','PYTHONUNBUFFERED':'1','FUNK_BROWSER_PROXY_PORT':str(proxy.getsockname()[1])},preexec_fn=drop_privileges,start_new_session=True)
         ready,_,_=select.select([browser.stdout],[],[],20)
         if not ready or json.loads(browser.stdout.readline(4096))!={'ready':True}: raise RuntimeError('Browser failed to start.')
         session_send(conn,{'session':'started'})
@@ -281,13 +322,39 @@ def serve_session(conn,workspace):
     except Exception:
         try: session_send(conn,{'error':'Desktop session failed; actions may have run and the previous workspace was retained.'})
         except OSError: pass
+    if proxy: proxy.close()
     # PID 1 exits after return; the private namespace is discarded.
+
+
+
+def start_kill_switch():
+    """Root-only out-of-band kill request; exiting PID 1 tears down the container."""
+    path='/control/computer-kill.sock'
+    try: os.unlink(path)
+    except FileNotFoundError: pass
+    server=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);server.bind(path);os.chmod(path,0o600);server.listen(2)
+    def listen():
+        while True:
+            try:
+                conn,_=server.accept()
+                with conn:
+                    conn.settimeout(2)
+                    data=b''
+                    while len(data)<5:
+                        chunk=conn.recv(5-len(data))
+                        if not chunk: break
+                        data+=chunk
+                    if data==b'kill\n': os._exit(137)
+            except OSError: continue
+    threading.Thread(target=listen,daemon=True).start()
+    return server
 
 
 def main():
     if os.getpid()!=1: raise RuntimeError('Worker requires a private container PID namespace with Python as PID 1.')
     control_dir=os.path.dirname(CONTROL)
     os.makedirs(control_dir,mode=0o700,exist_ok=True);os.chmod(control_dir,0o700)
+    kill_server=start_kill_switch()
     try: os.unlink(CONTROL)
     except FileNotFoundError: pass
     server=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);server.bind(CONTROL)

@@ -9,3 +9,6 @@ data/
 .venv/
 coverage/
 *.tsbuildinfo
+
+# Local computer verification output may contain environment details.
+computer-verification.txt

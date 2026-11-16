@@ -1,7 +1,7 @@
 """Unprivileged persistent Playwright browser for one isolated computer session.
 
-This process has no network access. External browser traffic remains disabled
-until an explicitly authorized network broker is implemented.
+Direct external traffic is unavailable. HTTPS is sent only through the
+owner-allowlisted, individually approved backend network broker.
 """
 import json
 import os
@@ -31,7 +31,7 @@ def perform(page, action):
     kind=action['type']
     if kind=='open_url' and set(action)=={'type','url'}:
         url=action['url']
-        if not isinstance(url,str) or len(url)>2048 or not allowed_url(url): raise ValueError('Only workspace file URLs and about:blank are currently available; network access is disabled.')
+        if not isinstance(url,str) or len(url)>2048 or not (allowed_url(url) or urlsplit(url).scheme=='https'): raise ValueError('Only workspace file URLs, about:blank and approved HTTPS sites are available.')
         page.goto(url,wait_until='domcontentloaded',timeout=10000)
     elif kind=='click' and set(action)=={'type','x','y'}:
         x,y=action['x'],action['y']
@@ -66,10 +66,11 @@ def perform(page, action):
 def main():
     os.environ.setdefault('HOME','/tmp')
     with sync_playwright() as playwright:
-        browser=playwright.chromium.launch(executable_path='/usr/bin/chromium',headless=False,args=['--no-sandbox','--disable-dev-shm-usage','--disable-background-networking','--no-first-run'])
+        proxy_port=int(os.environ['FUNK_BROWSER_PROXY_PORT'])
+        browser=playwright.chromium.launch(executable_path='/usr/bin/chromium',headless=False,args=['--no-sandbox','--disable-dev-shm-usage','--disable-background-networking','--disable-quic','--disable-http2','--no-first-run',f'--proxy-server=http://127.0.0.1:{proxy_port}','--proxy-bypass-list=<-loopback>'])
         context=browser.new_context(viewport={'width':1024,'height':768},service_workers='block',accept_downloads=False)
         def route_request(route):
-            if allowed_url(route.request.url): route.continue_()
+            if allowed_url(route.request.url) or urlsplit(route.request.url).scheme=='https': route.continue_()
             else: route.abort()
         context.route('**/*',route_request)
         page=context.new_page();page.goto('about:blank')
