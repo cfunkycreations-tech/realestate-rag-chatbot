@@ -112,3 +112,22 @@ def test_routine_approval_denial_and_global_pause(monkeypatch):
         assert c.post(f"/api/routines/{rid}/runs/{item['id']}/decision",json={'decision':'approve'}).status_code==409
         assert c.get('/api/missions/'+mid).json()['status']=='cancelled'
         assert len(FakeClient.responses)==1
+
+
+def test_repeated_work_suggests_owner_approved_routine():
+    with TestClient(service.app) as c:
+        setup(c);bot=c.post('/api/bots',json={'name':'Observer'}).json()['id']
+        with service.db() as db:
+            from funkbot.learned_routines import discover
+            for i,text in enumerate(['Summarize the weekly report','  summarize  the weekly report  ']):
+                mid='learned-'+str(i)
+                db.execute('INSERT INTO missions VALUES (?,?,?,?,?,?,?,?,?)',(mid,'Weekly report',text,None,'done','Done',None,1+i,1+i))
+                db.execute('INSERT INTO mission_assignees VALUES (?,?,?)',(mid,0,bot))
+            discover(db,10);discover(db,11)
+        suggestions=c.get('/api/routine-suggestions').json()
+        assert len(suggestions)==1 and suggestions[0]['examples']==2
+        assert c.get('/api/routines').json()==[]
+        body={'title':'Weekly report','instructions':'Summarize the weekly report','bot_id':bot,'cron':'0 9 * * 1','timezone':'UTC'}
+        approved=c.post('/api/routine-suggestions/'+suggestions[0]['id']+'/approve',json=body)
+        assert approved.status_code==200 and len(c.get('/api/routines').json())==1
+        assert c.get('/api/routine-suggestions').json()==[]

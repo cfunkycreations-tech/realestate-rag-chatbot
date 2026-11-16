@@ -2461,6 +2461,8 @@ async def routine_tick(now=None):
         c.execute('BEGIN IMMEDIATE')
         paused=c.execute("SELECT value FROM config WHERE key='global_pause'").fetchone()
         if paused and paused['value']=='1': return
+        from funkbot.learned_routines import discover
+        discover(c,now)
         # Bound catch-up pressure. Advance each slot atomically with its mission;
         # a uniqueness constraint and SQLite write lock prevent duplicate slots.
         outstanding=c.execute("SELECT count(*) FROM routine_runs JOIN missions ON missions.id=routine_runs.mission_id WHERE missions.status IN ('queued','running','waiting_approval')").fetchone()[0]
@@ -2484,6 +2486,36 @@ async def routine_scheduler():
         except asyncio.CancelledError: raise
         except Exception: logging.getLogger('uvicorn.error').exception('Routine scheduler tick failed')
         await asyncio.sleep(5)
+
+
+@app.get('/api/routine-suggestions')
+def routine_suggestions(request: Request):
+    require_auth(request)
+    with db() as c:
+        rows=c.execute("SELECT * FROM routine_suggestions WHERE status='pending' ORDER BY created_at DESC LIMIT 100").fetchall()
+    return [redact_event_value(dict(row),configured_secrets()) for row in rows]
+
+
+@app.post('/api/routine-suggestions/{suggestion_id}/approve')
+def approve_routine_suggestion(suggestion_id: str,body: RoutineIn,request: Request):
+    require_auth(request);now=time.time();title,instructions,next_at=validate_routine(body,now);rid=str(uuid.uuid4())
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        suggestion=c.execute("SELECT * FROM routine_suggestions WHERE id=? AND status='pending'",(suggestion_id,)).fetchone()
+        if not suggestion: raise HTTPException(404,'Pending suggestion not found.')
+        if suggestion['bot_id']!=body.bot_id: raise HTTPException(400,'The suggestion belongs to a different Bot.')
+        if c.execute('SELECT count(*) FROM routines').fetchone()[0]>=50: raise HTTPException(400,'At most 50 routines are allowed.')
+        c.execute('INSERT INTO routines VALUES (?,?,?,?,?,?,?,?,?,?)',(rid,title,instructions,body.bot_id,body.cron.strip(),body.timezone.strip(),0,next_at,now,now))
+        c.execute("UPDATE routine_suggestions SET status='approved',routine_id=? WHERE id=?",(rid,suggestion_id))
+    return {'id':rid}
+
+
+@app.post('/api/routine-suggestions/{suggestion_id}/dismiss')
+def dismiss_routine_suggestion(suggestion_id: str,request: Request):
+    require_auth(request)
+    with db() as c:
+        if not c.execute("UPDATE routine_suggestions SET status='dismissed' WHERE id=? AND status='pending'",(suggestion_id,)).rowcount: raise HTTPException(404,'Pending suggestion not found.')
+    return {'ok':True}
 
 
 @app.get('/api/routines')
