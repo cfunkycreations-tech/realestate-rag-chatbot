@@ -33,6 +33,9 @@ def test_backup_restore_roundtrip_is_staged_and_preserves_current_installation()
         dm=c.post('/api/bot-dms',json={'name':'Saved exchange','sender_id':bot,'receiver_id':other}).json()['id']
         with service.db() as db:
             db.execute("INSERT INTO bot_dm_messages VALUES ('dm-msg',?,NULL,?,'sender','Saved message',NULL,1)",(dm,bot))
+            db.execute("INSERT INTO routine_suggestions VALUES ('suggestion',?,'fingerprint','Repeated','Do work',2,'pending',1,NULL)",(bot,))
+            db.execute("INSERT INTO inbox_notices VALUES ('notice',?,'bot','Update','Saved',NULL,NULL,1,NULL)",(bot,))
+            db.execute("INSERT INTO bot_memories VALUES ('memory',?,'Fact',0,1,1,'learned_chat',NULL)",(bot,))
         assert c.post(f'/api/bots/{bot}/computer/files',files={'file':('sandbox.txt',b'computer data')}).status_code==200
         assert c.put(f'/api/bots/{bot}/computer/permission',json={'allowed':True,'expected_revision':0}).status_code==200
         workflow=c.post('/api/workflows',json={'name':'Reusable','bot_id':bot,'steps':['Original']}).json()['id']
@@ -55,6 +58,9 @@ def test_backup_restore_roundtrip_is_staged_and_preserves_current_installation()
         with sqlite3.connect(stage/'funk.db') as db:
             assert db.execute('select name from bots order by name').fetchall()==[('Original',),('Other',)]
             assert db.execute('select content from bot_dm_messages').fetchone()[0]=='Saved message'
+            assert db.execute('select title from routine_suggestions').fetchone()[0]=='Repeated'
+            assert db.execute('select body from inbox_notices').fetchone()[0]=='Saved'
+            assert db.execute('select content from bot_memories').fetchone()[0]=='Fact'
             assert db.execute('SELECT allowed,revision FROM computer_permissions WHERE bot_id=?',(bot,)).fetchone()==(1,1)
             snapshot=json.loads(db.execute('SELECT snapshot FROM computer_workspaces WHERE bot_id=?',(bot,)).fetchone()[0])
             assert base64.b64decode(snapshot['files']['sandbox.txt']['data'])==b'computer data'
@@ -138,6 +144,6 @@ def test_restore_upgrades_older_snapshot_only_in_isolated_stage(tmp_path):
         r=c.post('/api/workspace/restore',content=out.getvalue(),headers={'content-type':'application/zip'});assert r.status_code==200,r.text
         stage=service.DATA/'restores'/r.json()['staged_id']
         with sqlite3.connect(stage/'funk.db') as db:
-            assert db.execute('SELECT version_num FROM alembic_version').fetchone()[0]=='0025_computer_permissions'
+            assert db.execute('SELECT version_num FROM alembic_version').fetchone()[0]=='0027_inbox_notices'
             assert db.execute('SELECT name FROM bots').fetchone()[0]=='Preserved'
         with sqlite3.connect(old/'funk.db') as db: assert db.execute('SELECT version_num FROM alembic_version').fetchone()[0]=='0019_attachments'
