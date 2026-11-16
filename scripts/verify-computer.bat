@@ -38,6 +38,7 @@ exit /b %ERRORLEVEL%
 :PYTHON_PROBE
 import base64
 import json
+import shlex
 import socket
 import time
 
@@ -90,11 +91,12 @@ def command(cmd, workspace, desktop=False):
     return result['workspace'], result['output']
 
 print('Running real worker, desktop, sandbox and workspace checks')
-workspace, output = command("printf 'UID='; id -u; if test -r /control/computer.sock; then echo CONTROL_READABLE; else echo CONTROL_PROTECTED; fi; if touch /root-write-test 2>/dev/null; then echo ROOT_WRITABLE; else echo ROOT_READONLY; fi; cat /proc/net/route; command -v chromium; command -v Xvfb; printf computer-fixture > proof.txt; sleep 4", EMPTY, True)
+html = """<!doctype html><input id="name"><button id="go" onclick="document.querySelector('#result').textContent=document.querySelector('#name').value">Go</button><p id="result"></p>"""
+workspace, output = command("printf 'UID='; id -u; if test -r /control/computer.sock; then echo CONTROL_READABLE; else echo CONTROL_PROTECTED; fi; if touch /root-write-test 2>/dev/null; then echo ROOT_WRITABLE; else echo ROOT_READONLY; fi; cat /proc/net/route; command -v chromium; command -v Xvfb; printf computer-fixture > proof.txt; printf %s " + shlex.quote(html) + " > fixture.html; sleep 4", EMPTY, True)
 assert 'UID=65534' in output and 'CONTROL_PROTECTED' in output and 'ROOT_READONLY' in output
 routes = [line for line in output.splitlines() if '\t00000000\t' in line]
 assert not routes, 'A default IPv4 route was present: ' + repr(routes)
-assert 'proof.txt' in workspace['files']
+assert 'proof.txt' in workspace['files'] and 'fixture.html' in workspace['files']
 _, output = command('cat proof.txt', workspace)
 assert 'computer-fixture' in output
 print('PASS: worker ran unprivileged, control/socket and root were protected, no default IPv4 route, desktop frame arrived and workspace restored')
@@ -112,15 +114,24 @@ def receive():
         return msg
 def send(value): sock.sendall(json.dumps(value).encode()+b'\n')
 assert receive()=={'session':'started'}, 'Playwright Chromium did not start'
-send({'type':'action','id':'one','action':{'type':'open_url','url':'about:blank'}})
-response=receive();assert response.get('ok') and response.get('frame'),response
+def action(identifier, body):
+    send({'type':'action','id':identifier,'action':body})
+    response=receive()
+    assert response.get('id')==identifier and response.get('ok'),response
+    image=base64.b64decode(response.get('frame',''),validate=True)
+    assert image.startswith(b'\x89PNG\r\n\x1a\n') and len(image)<=1024*1024,response
+    return response.get('result',{})
+action('open',{'type':'open_url','url':'file:///workspace/fixture.html'})
+action('fill',{'type':'fill','selector':'#name','text':'verified Playwright'})
+action('click',{'type':'click_selector','selector':'#go'})
+assert 'verified Playwright' in action('extract',{'type':'extract_text'}).get('text','')
 send({'type':'takeover','id':'take','enabled':True});assert receive().get('takeover') is True
 send({'type':'action','id':'blocked','action':{'type':'screenshot'}});assert receive().get('ok') is False
 send({'type':'takeover','id':'back','enabled':False});assert receive().get('takeover') is False
-send({'type':'action','id':'two','action':{'type':'screenshot'}});assert receive().get('ok') is True
-send({'type':'close'});result=receive();assert result.get('session')=='ended',result
+action('two',{'type':'screenshot'})
+send({'type':'close'});result=receive();assert result.get('session')=='ended' and result.get('reason')=='closed' and 'fixture.html' in result.get('workspace',{}).get('files',{}),result
 sock.close()
-print('PASS: real Playwright session persisted across actions, captured screenshots and blocked Bot actions during takeover')
+print('PASS: real Playwright navigated, filled, clicked, extracted text, captured screenshots, blocked Bot actions during takeover and saved workspace')
 
 print('Checking the out-of-band worker kill socket')
 sock, stream=connect();sock.sendall(json.dumps({'command':'sleep 20','workspace':EMPTY}).encode()+b'\n');time.sleep(1)
