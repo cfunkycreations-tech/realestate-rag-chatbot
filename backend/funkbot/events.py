@@ -41,7 +41,16 @@ class GroupExchange(BaseModel):
     summary: str = Field(max_length=240)
 
 
+class BotDMMessage(BaseModel):
+    dm_id: str
+    turn_id: str
+    from_bot_id: str
+    to_bot_id: str
+    summary: str = Field(max_length=240)
+
+
 PAYLOAD_TYPES = {
+    'bot_dm.message': BotDMMessage,
     'handoff.created': GroupExchange,
     'group.session_started': GroupSession,
     'group.session_ended': GroupSession,
@@ -59,7 +68,7 @@ class EventOut(BaseModel):
     id: int
     bot_id: str | None
     run_id: str | None
-    type: Literal['handoff.created', 'run.started', 'run.finished', 'bot.state_changed', 'message.sent', 'error.raised', 'group.session_started', 'group.session_ended', 'group.delegated', 'group.replied']
+    type: Literal['bot_dm.message', 'handoff.created', 'run.started', 'run.finished', 'bot.state_changed', 'message.sent', 'error.raised', 'group.session_started', 'group.session_ended', 'group.delegated', 'group.replied']
     payload: dict
     created_at: float
 

@@ -25,6 +25,7 @@ function description(e:OfficeEvent,names:Map<string,string>):string{
   if(e.type==='group.session_ended')return `${e.payload.session_kind==='group_chat'?'Group chat':e.payload.mission_id?'Mission':'Demo'}: the meeting ends.`;
   if(e.type==='handoff.created')return `${name} handed off to ${names.get(String(e.payload.to_bot_id))||'Bot'}: ${String(e.payload.summary||'')}`;
   if(e.type==='group.delegated')return `${name} delegated: ${String(e.payload.summary||'')}`;
+  if(e.type==='bot_dm.message')return `${name} sent a Bot DM: ${String(e.payload.summary||'')}`;
   if(e.type==='group.replied')return `${name} replied: ${String(e.payload.summary||'')}`;
   return '';
 }

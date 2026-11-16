@@ -64,7 +64,7 @@ export function projectOffice(bots:OfficeBot[],events:OfficeEvent[],now:number):
       if(!meetings.get(e.bot_id)?.size){c.state=e.payload.state;move(c,desk(found.index),at)}
     }else if(e.type==='message.sent'&&typeof e.payload.summary==='string'){
       c.bubble=e.payload.summary;c.bubbleAt=at;
-    }else if((e.type==='group.delegated'||e.type==='group.replied'||e.type==='handoff.created')&&typeof e.payload.summary==='string'){c.bubble=e.payload.summary;c.bubbleAt=at;
+    }else if((e.type==='group.delegated'||e.type==='group.replied'||e.type==='handoff.created'||e.type==='bot_dm.message')&&typeof e.payload.summary==='string'){c.bubble=e.payload.summary;c.bubbleAt=at;
     }else if(e.type==='error.raised'&&!meetings.get(e.bot_id)?.size)c.state='error';
   }
   return characters;
