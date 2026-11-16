@@ -44,7 +44,8 @@
     "test:bot-dms": "node scripts/bot-dms-e2e.mjs",
     "test:web-search": "node scripts/web-search-e2e.mjs",
     "test:mentions": "node scripts/mentions-e2e.mjs",
-    "test:computer": "node scripts/computer-e2e.mjs"
+    "test:computer": "node scripts/computer-e2e.mjs",
+    "test:computer-stop": "node scripts/computer-stop-e2e.mjs"
   },
   "dependencies": {
     "@tanstack/react-virtual": "^3.14.26",

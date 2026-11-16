@@ -264,3 +264,78 @@ def test_total_snapshot_limit_preserves_existing_workspace(tmp_path,monkeypatch)
     with pytest.raises(tools.ToolError,match='limit'):
         with service.db() as db: computer.persist_workspace(db,ctx.bot_id,{'dirs':[],'files':{}})
     with service.db() as db: assert computer.read_workspace(db,ctx.bot_id)==saved
+
+
+def test_worker_disconnect_interrupts_running_shell(tmp_path,monkeypatch):
+    import socket
+    import threading
+    import time
+    monkeypatch.setitem(sys.modules,'computer_snapshot',snapshots)
+    spec=importlib.util.spec_from_file_location('computer_worker',Path(__file__).resolve().parents[2]/'computer'/'worker.py')
+    worker=importlib.util.module_from_spec(spec);spec.loader.exec_module(worker)
+    monkeypatch.setattr(worker,'WORKSPACE',str(tmp_path));monkeypatch.setattr(worker,'TEMP',str(tmp_path))
+    monkeypatch.setattr(worker,'drop_privileges',lambda:None)
+    spawned=threading.Event();finished=threading.Event();outcome=[]
+    original=worker.subprocess.Popen
+    def launch(*args,**kwargs):
+        process=original(*args,**kwargs);spawned.set();return process
+    monkeypatch.setattr(worker.subprocess,'Popen',launch)
+    server,client=socket.socketpair()
+    def execute():
+        try: worker.execute('sleep 10; echo late > late.txt',server)
+        except BaseException as exc: outcome.append(exc)
+        finally: finished.set()
+    thread=threading.Thread(target=execute,daemon=True);thread.start()
+    try:
+        assert spawned.wait(5)
+        start=time.monotonic();client.close()
+        assert finished.wait(3) and time.monotonic()-start<3
+        assert len(outcome)==1 and isinstance(outcome[0],worker.CommandCancelled)
+        assert not (tmp_path/'late.txt').exists()
+    finally: client.close();server.close();thread.join(timeout=3)
+
+
+@pytest.mark.parametrize('mode',['computer','job','pause'])
+def test_stop_disconnects_inflight_worker_and_preserves_snapshot(tmp_path,monkeypatch,mode):
+    import socket
+    import threading
+    monkeypatch.setenv('FUNK_COMPUTER_ENABLED','1');monkeypatch.setattr(computer,'SOCKET',str(tmp_path/'worker.sock'))
+    listener=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);listener.bind(computer.SOCKET);listener.listen(1);listener.settimeout(10)
+    received=threading.Event();disconnected=threading.Event();errors=[]
+    def fake_worker():
+        try:
+            conn,_=listener.accept()
+            with conn:
+                conn.settimeout(10);conn.sendall(b'{"ready":1}\n')
+                stream=conn.makefile('rb');request=json.loads(stream.readline());assert request['command']=='sleep 30'
+                received.set();assert stream.read()==b'';disconnected.set()
+        except BaseException as exc: errors.append(exc)
+    thread=threading.Thread(target=fake_worker,daemon=True);thread.start()
+    FakeClient.responses=[tool_reply('computer_shell',{'command':'sleep 30'}),final_reply()]
+    monkeypatch.setattr(service.httpx,'AsyncClient',FakeClient)
+    try:
+        with TestClient(service.app) as client:
+            assert client.get('/api/control/computer').status_code==401
+            assert client.post('/api/control/computer/stop',json={'run_id':'x'}).status_code==401
+            setup(client);configure_budget(client)
+            bot=client.post('/api/bots',json={'name':'Stopper'}).json()['id']
+            assert client.post(f'/api/bots/{bot}/computer/files',files={'file':('before.txt',b'kept')}).status_code==200
+            run=client.post(f'/api/bots/{bot}/chat',json={'content':'Run'}).json()['job_id'];call=until_calls(client,run)[0]
+            assert client.post(f'/api/jobs/{run}/tool-calls/{call["id"]}/decision',json={'decision':'approve_once'}).status_code==200
+            assert received.wait(5)
+            assert client.get('/api/control/computer').json()['active']=={'run_id':run,'bot_id':bot}
+            assert client.post('/api/control/computer/stop',json={'run_id':'stale'}).json()=={'requested':False}
+            assert not disconnected.is_set()
+            if mode=='computer': assert client.post('/api/control/computer/stop',json={'run_id':run}).json()=={'requested':True}
+            elif mode=='job': assert client.post(f'/api/jobs/{run}/stop').status_code==200
+            else: assert client.put('/api/control/pause',json={'paused':True}).status_code==200
+            assert disconnected.wait(5)
+            assert get_events(client,run)[-1]['type']=='error'
+            assert client.get('/api/control/computer').json()['active'] is None
+            assert client.get(f'/api/bots/{bot}/computer/download',params={'path':'before.txt'}).content==b'kept'
+            call=client.get(f'/api/jobs/{run}/tool-calls').json()[0]
+            assert call['status']=='failed' and 'interrupted' in [a['action'] for a in call['audit']]
+            assert client.post('/api/control/computer/stop',json={'run_id':run}).json()=={'requested':False}
+    finally:
+        listener.close();thread.join(timeout=10)
+    assert errors==[]

@@ -2,6 +2,7 @@
 import json
 import os
 import resource
+import select
 import signal
 import socket
 import subprocess
@@ -100,19 +101,43 @@ def collect_as_user():
     return snapshot.validate(json.loads(data))
 
 
-def execute(command):
+class CommandCancelled(Exception): pass
+
+
+def peer_disconnected(conn):
+    if conn is None: return False
+    try:
+        ready,_,_=select.select([conn],[],[],0)
+        # Any additional input violates the one-request protocol. EOF means
+        # the backend cancelled or disappeared; both must stop the command.
+        if not ready: return False
+        conn.recv(1,socket.MSG_PEEK)
+        return True
+    except (OSError,ValueError): return True
+
+
+def execute(command,conn=None):
     with tempfile.TemporaryFile(dir=TEMP) as output:
+        if peer_disconnected(conn): raise CommandCancelled()
         process=subprocess.Popen(['/bin/sh','-c',command],cwd=WORKSPACE,
             stdin=subprocess.DEVNULL,stdout=output,stderr=subprocess.STDOUT,
             env={'PATH':'/usr/local/bin:/usr/bin:/bin','HOME':'/workspace','TMPDIR':'/tmp'},
             close_fds=True,start_new_session=True,preexec_fn=drop_privileges)
-        timed_out=False
-        try: code=process.wait(timeout=30)
-        except subprocess.TimeoutExpired:
-            timed_out=True
+        timed_out=False;cancelled=False;deadline=time.monotonic()+30
+        while True:
+            # Check the connection even if the child exited, so a cancelled
+            # caller does not receive or persist a workspace result.
+            if peer_disconnected(conn): cancelled=True;break
+            code=process.poll()
+            if code is not None: break
+            if time.monotonic()>=deadline: timed_out=True;break
+            time.sleep(.05)
+        if timed_out or cancelled:
             try: os.killpg(process.pid,signal.SIGKILL)
             except ProcessLookupError: pass
-            code=process.wait()
+            try: code=process.wait(timeout=2)
+            except subprocess.TimeoutExpired: raise CommandCancelled()  # PID 1 exit tears down the container.
+        if cancelled: raise CommandCancelled()
         output.seek(0);data=output.read(MAX_OUTPUT+1)
         return {'output':data[:MAX_OUTPUT].decode('utf-8',errors='replace'),
                 'truncated':len(data)>MAX_OUTPUT,'exit_code':code,'timed_out':timed_out}
@@ -144,10 +169,13 @@ def main():
             except (ValueError,OSError,TimeoutError,RecursionError): continue
             try:
                 restore_as_user(request['workspace'])
-                result=execute(request['command'])
+                result=execute(request['command'],conn)
                 stop_unprivileged_processes()
                 result['workspace']=collect_as_user()
                 conn.sendall(json.dumps(result,ensure_ascii=True,separators=(',',':')).encode()+b'\n')
+            except CommandCancelled:
+                try: stop_unprivileged_processes()
+                except Exception: pass  # Container exit remains the last resort.
             except Exception:
                 try: conn.sendall(b'{"error":"Computer execution or workspace save failed; previous workspace retained. Command may have run."}\n')
                 except OSError: pass

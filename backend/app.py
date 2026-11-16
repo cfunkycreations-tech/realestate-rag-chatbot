@@ -3424,6 +3424,28 @@ async def decide_tool_call(job_id: str, call_id: str, body: ToolDecisionIn, requ
     return {'ok':True}
 
 
+@app.get('/api/control/computer')
+def get_computer_control(request: Request):
+    require_auth(request)
+    return {'enabled':computer.enabled(),'active':computer.active_info()}
+
+
+class ComputerStopIn(BaseModel):
+    run_id: str = Field(min_length=1,max_length=128)
+
+
+@app.post('/api/control/computer/stop')
+async def stop_computer(body: ComputerStopIn,request: Request):
+    require_auth(request)
+    active=computer.active_info()
+    job=jobs.get(active['run_id']) if active and active['run_id']==body.run_id else None
+    if job and not job['done'] and job.get('task'):
+        job['user_cancelled']=True
+        job['task'].cancel()
+        return {'requested':True}
+    return {'requested':False}
+
+
 @app.post('/api/jobs/{job_id}/stop')
 async def stop_job(job_id: str, request: Request):
     require_auth(request)

@@ -14,9 +14,14 @@ from .tools import ToolError
 SOCKET='/computer-control/computer.sock'
 MAX_STORED=50 * 1024 * 1024
 _lock=asyncio.Lock()  # single backend worker only
+_active=None
 
 
 def enabled(): return os.environ.get('FUNK_COMPUTER_ENABLED')=='1'
+
+
+def active_info():
+    return dict(_active) if _active else None
 
 
 def check_live(context):
@@ -79,11 +84,13 @@ async def ready_connection():
 
 
 async def execute(context,command):
+    global _active
     if not enabled(): raise ToolError('Computer sandbox is disabled.')
     # Never queue accepted actions behind another Bot's command: policy and run
     # state remain easy to reason about and snapshots cannot overwrite each other.
     if _lock.locked(): raise ToolError('Computer sandbox is busy; no command was sent.')
     async with _lock:
+        _active={'run_id':context.run_id,'bot_id':context.bot_id}
         writer=None;sent=False
         try:
             workspace=load_workspace(context)
@@ -107,7 +114,8 @@ async def execute(context,command):
             message='Computer sandbox interrupted or workspace could not be saved; the command may have run and the previous workspace is retained. Do not retry without review.' if sent else 'Computer sandbox unavailable; no command was sent.'
             raise ToolError(message) from exc
         finally:
+            if writer: writer.close()
+            _active=None
             if writer:
-                writer.close()
                 try: await writer.wait_closed()
                 except OSError: pass
