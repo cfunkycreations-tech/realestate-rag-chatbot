@@ -99,3 +99,19 @@ def test_interrupted_group_turn_is_failed_and_office_session_closed():
         turn=c.get('/api/group-chats/'+chat).json()['turns'][0];assert turn['status']=='failed' and 'restarted' in turn['error']
         events=c.get('/api/events?since=0&limit=500').json()['events']
         assert any(e['type']=='group.session_ended' and e['payload']['mission_id']=='t' for e in events)
+
+
+def test_group_chat_mentions_share_metadata_and_notify(monkeypatch):
+    payloads=[]
+    class Recording(FakeClient):
+        def stream(self,*args,**kwargs): payloads.append(kwargs['json']);return super().stream(*args,**kwargs)
+    monkeypatch.setattr(service.httpx,'AsyncClient',Recording)
+    with TestClient(service.app) as c:
+        chief,member,group,chat=prepare(c)
+        FakeClient.responses=[response('plan'),response('reply'),response('summary')]
+        text=f'Ask @{{bot:{member}|Member}} to help.'
+        assert c.post(f'/api/group-chats/{chat}/messages',json={'content':text}).status_code==200
+        assert wait(c,chat,{'done','failed'})['turns'][0]['status']=='done'
+        assert all(member in p['messages'][-1]['content'] and 'untrusted metadata' in p['messages'][-1]['content'] for p in payloads)
+        assert any(n['kind']=='mention' and n['bot_id']==member for n in c.get('/api/inbox/notices').json())
+        assert c.post(f'/api/group-chats/{chat}/messages',json={'content':'@{bot:00000000-0000-0000-0000-000000000000|Missing}'}).status_code==400
