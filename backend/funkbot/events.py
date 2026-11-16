@@ -5,6 +5,10 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 
+class ComputerTakeover(BaseModel):
+    enabled: bool
+
+
 class ComputerOwnerInput(BaseModel):
     input_type: Literal['click','key','text']
 
@@ -61,6 +65,7 @@ class BotDMMessage(BaseModel):
 PAYLOAD_TYPES = {
     'computer.permission_changed': ComputerPermissionChanged,
     'computer.owner_input': ComputerOwnerInput,
+    'computer.takeover': ComputerTakeover,
     'bot_dm.message': BotDMMessage,
     'handoff.created': GroupExchange,
     'group.session_started': GroupSession,
@@ -79,7 +84,7 @@ class EventOut(BaseModel):
     id: int
     bot_id: str | None
     run_id: str | None
-    type: Literal['computer.owner_input', 'computer.permission_changed', 'bot_dm.message', 'handoff.created', 'run.started', 'run.finished', 'bot.state_changed', 'message.sent', 'error.raised', 'group.session_started', 'group.session_ended', 'group.delegated', 'group.replied']
+    type: Literal['computer.takeover', 'computer.owner_input', 'computer.permission_changed', 'bot_dm.message', 'handoff.created', 'run.started', 'run.finished', 'bot.state_changed', 'message.sent', 'error.raised', 'group.session_started', 'group.session_ended', 'group.delegated', 'group.replied']
     payload: dict
     created_at: float
 

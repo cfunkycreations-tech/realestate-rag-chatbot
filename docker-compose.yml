@@ -32,7 +32,7 @@ services:
     mem_limit: 512m
     cpus: 1.0
     tmpfs:
-      - /tmp:size=16m,mode=1777,nosuid,nodev
+      - /tmp:size=128m,mode=1777,nosuid,nodev
       - /workspace:size=128m,mode=1777,nosuid,nodev
     volumes: ["computer_control:/control"]
   omniroute:

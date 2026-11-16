@@ -6,6 +6,7 @@ until an explicitly authorized network broker is implemented.
 import json
 import os
 import sys
+import subprocess
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
@@ -35,7 +36,7 @@ def perform(page, action):
     elif kind=='click' and set(action)=={'type','x','y'}:
         x,y=action['x'],action['y']
         if type(x) is not int or type(y) is not int or not (0<=x<1024 and 0<=y<768): raise ValueError('Invalid click coordinates.')
-        page.mouse.click(x,y)
+        subprocess.run(['xdotool','mousemove','--sync',str(x),str(y),'click','1'],timeout=3,check=True)
     elif kind=='type' and set(action)=={'type','text'}:
         text=action['text']
         if not isinstance(text,str) or not 1<=len(text)<=2000 or '\x00' in text: raise ValueError('Invalid text.')
@@ -63,7 +64,7 @@ def perform(page, action):
 
 
 def main():
-    os.environ.setdefault('HOME',str(WORKSPACE))
+    os.environ.setdefault('HOME','/tmp')
     with sync_playwright() as playwright:
         browser=playwright.chromium.launch(executable_path='/usr/bin/chromium',headless=False,args=['--no-sandbox','--disable-dev-shm-usage','--disable-background-networking','--no-first-run'])
         context=browser.new_context(viewport={'width':1024,'height':768},service_workers='block',accept_downloads=False)

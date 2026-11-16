@@ -11,8 +11,8 @@ MAX_CALLS=6
 MAX_ARGUMENT_BYTES=20_000
 
 
-def declarations(include_mcp=False, include_handoff=False, include_mission_artifacts=False, include_search=False, include_computer=False):
-    return [{'type':'function','function':{'name':spec.name,'description':spec.description,'parameters':spec.args.model_json_schema()}} for spec in REGISTRY.values() if (spec.name!='computer_shell' or include_computer) and (spec.name!='web_search' or include_search) and (spec.name!='mcp_call' or include_mcp) and (spec.name!='create_handoff' or include_handoff) and (spec.name not in ('attach_mission_result','read_work_file') or include_mission_artifacts)]
+def declarations(include_mcp=False, include_handoff=False, include_mission_artifacts=False, include_search=False, include_computer=False, include_desktop=False):
+    return [{'type':'function','function':{'name':spec.name,'description':spec.description,'parameters':spec.args.model_json_schema()}} for spec in REGISTRY.values() if (spec.name!='computer_action' or include_desktop) and (spec.name!='computer_shell' or include_computer) and (spec.name!='web_search' or include_search) and (spec.name!='mcp_call' or include_mcp) and (spec.name!='create_handoff' or include_handoff) and (spec.name not in ('attach_mission_result','read_work_file') or include_mission_artifacts)]
 
 
 class CallAccumulator:
@@ -47,7 +47,7 @@ class CallAccumulator:
             if name not in REGISTRY: raise ToolError('Unknown tool.')
             try:
                 args=json.loads(call['arguments'])
-                parsed=REGISTRY[name].args.model_validate(args).model_dump()
+                parsed=REGISTRY[name].args.model_validate(args).model_dump(exclude_none=True)
             except (json.JSONDecodeError,ValidationError,TypeError) as exc:
                 raise ToolError('Invalid tool arguments.') from exc
             seen.add(identifier);result.append({'id':identifier,'name':name,'arguments':parsed})

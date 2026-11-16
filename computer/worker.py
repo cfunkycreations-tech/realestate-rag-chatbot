@@ -130,13 +130,13 @@ def desktop_input(event):
     elif kind=='text' and set(event)=={'type','text'} and isinstance(event['text'],str) and 1<=len(event['text'])<=200 and all(32<=ord(c)<=126 for c in event['text']):
         args=['type','--clearmodifiers','--delay','0','--',event['text']]
     else: return
-    try: subprocess.run(['xdotool',*args],env={'DISPLAY':':99','PATH':'/usr/bin:/bin','HOME':WORKSPACE},stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,preexec_fn=drop_privileges,timeout=2,check=False)
+    try: subprocess.run(['xdotool',*args],env={'DISPLAY':':99','PATH':'/usr/bin:/bin','HOME':'/tmp'},stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,preexec_fn=drop_privileges,timeout=2,check=False)
     except (OSError,subprocess.TimeoutExpired): pass
 
 
 def desktop_frame():
     # Capture as the same unprivileged user as the display, with no shell.
-    env={'DISPLAY':':99','PATH':'/usr/bin:/bin','HOME':WORKSPACE}
+    env={'DISPLAY':':99','PATH':'/usr/bin:/bin','HOME':'/tmp'}
     try:
         xwd=subprocess.Popen(['xwd','-root','-silent'],env=env,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,preexec_fn=drop_privileges)
         try:
@@ -152,8 +152,8 @@ def desktop_frame():
 
 
 def start_desktop(conn):
-    display=subprocess.Popen(['Xvfb',':99','-screen','0','1024x768x24','-nolisten','tcp','-noreset'],cwd=WORKSPACE,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,env={'PATH':'/usr/bin:/bin','HOME':WORKSPACE},preexec_fn=drop_privileges,start_new_session=True)
-    env={'DISPLAY':':99','PATH':'/usr/bin:/bin','HOME':WORKSPACE}
+    display=subprocess.Popen(['Xvfb',':99','-screen','0','1024x768x24','-nolisten','tcp','-noreset'],cwd=WORKSPACE,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,env={'PATH':'/usr/bin:/bin','HOME':'/tmp'},preexec_fn=drop_privileges,start_new_session=True)
+    env={'DISPLAY':':99','PATH':'/usr/bin:/bin','HOME':'/tmp'}
     for _ in range(30):
         if peer_disconnected(conn): raise CommandCancelled()
         check=subprocess.run(['xdpyinfo'],env=env,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,preexec_fn=drop_privileges,timeout=2,check=False)
@@ -233,7 +233,7 @@ def serve_session(conn,workspace):
     browser=None;graceful=False
     try:
         restore_as_user(workspace);start_desktop(conn)
-        browser=subprocess.Popen(['python','-u','/session_browser.py'],cwd=WORKSPACE,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,env={'PATH':'/usr/local/bin:/usr/bin:/bin','HOME':WORKSPACE,'TMPDIR':'/tmp','DISPLAY':':99','PYTHONUNBUFFERED':'1'},preexec_fn=drop_privileges,start_new_session=True)
+        browser=subprocess.Popen(['python','-u','/session_browser.py'],cwd=WORKSPACE,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,env={'PATH':'/usr/local/bin:/usr/bin:/bin','HOME':'/tmp','TMPDIR':'/tmp','DISPLAY':':99','PYTHONUNBUFFERED':'1'},preexec_fn=drop_privileges,start_new_session=True)
         ready,_,_=select.select([browser.stdout],[],[],20)
         if not ready or json.loads(browser.stdout.readline(4096))!={'ready':True}: raise RuntimeError('Browser failed to start.')
         session_send(conn,{'session':'started'})

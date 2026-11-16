@@ -3,7 +3,7 @@ import json
 import time
 import uuid
 from pydantic import ValidationError
-from .tools import REGISTRY, ReviewedComputerArgs, ToolError
+from .tools import REGISTRY, ReviewedComputerArgs, ReviewedComputerActionArgs, ToolError
 
 
 def audit(c, call_id, action, now):
@@ -14,16 +14,16 @@ def propose(c, run_id, bot_id, name, arguments, redact, now=None, policy=None):
     """Validate and redact before persistence; caller owns a write transaction."""
     spec=REGISTRY.get(name)
     if not spec: raise ToolError('Unknown tool.')
-    args_type=ReviewedComputerArgs if name=='computer_shell' else spec.args
+    args_type=ReviewedComputerArgs if name=='computer_shell' else ReviewedComputerActionArgs if name=='computer_action' else spec.args
     try:
-        parsed=args_type.model_validate(arguments).model_dump()
+        parsed=args_type.model_validate(arguments).model_dump(exclude_none=True)
     except ValidationError as exc:
         raise ToolError('Invalid tool arguments.') from exc
     # The exact redacted arguments are both approved and later executed; never
     # show a sanitized card while executing different hidden arguments.
     cleaned={key:redact(value) if isinstance(value,str) else value for key,value in parsed.items()}
     try:
-        cleaned=args_type.model_validate(cleaned).model_dump()
+        cleaned=args_type.model_validate(cleaned).model_dump(exclude_none=True)
     except ValidationError as exc:
         raise ToolError('Redacted tool arguments are invalid.') from exc
     call_id=str(uuid.uuid4());now=time.time() if now is None else now

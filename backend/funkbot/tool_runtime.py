@@ -34,6 +34,7 @@ class ToolContext:
     destination_snapshot: Callable = None
     search_info: Callable = lambda c: None
     approved_destinations: list | None = None
+    vision: bool = False
 
 
 def live(c, context):
@@ -55,11 +56,12 @@ async def execute(context: ToolContext, name: str, args: dict, wait_decision):
         if not spec: raise tools.ToolError('Unknown tool.')
         policy=context.policy_for(c,name,spec.risk)
         connector=None
-        if name=='computer_shell':
-            parsed=tools.ComputerArgs.model_validate(args)
+        if name in ('computer_shell','computer_action'):
+            parsed=(tools.ComputerArgs if name=='computer_shell' else tools.ComputerActionArgs).model_validate(args)
             grant=computer.permission(c,context.bot_id)
-            args={'command':parsed.command,'permission_revision':grant['revision']}
-            if not computer.enabled() or not grant['allowed']: policy='deny'
+            args={**parsed.model_dump(exclude_none=True),'permission_revision':grant['revision']}
+            if not computer.enabled() or not grant['allowed'] or (name=='computer_action' and (not computer.desktop_enabled() or not context.vision)): policy='deny'
+            if context.policy_for(c,'computer_shell','write')=='deny': policy='deny'
         if name=='mcp_call':
             parsed=tools.McpCallArgs.model_validate(args)
             try: arguments=json.loads(parsed.arguments_json)
@@ -105,7 +107,7 @@ async def execute(context: ToolContext, name: str, args: dict, wait_decision):
             context.notify({'type':'tool.decision','call_id':call,'decision':'policy_denied','status':'denied'})
             return {'status':'denied','message':'The owner tool policy denied this call.'}
         if row['status']=='pending':
-            granted=name not in ('mcp_call','create_handoff','attach_mission_result','read_work_file','web_search','computer_shell') and name in context.run_grants
+            granted=name not in ('mcp_call','create_handoff','attach_mission_result','read_work_file','web_search','computer_shell','computer_action') and name in context.run_grants
             decision='run_grant' if granted else await wait_decision(call)
             with context.db() as c:
                 c.execute('BEGIN IMMEDIATE');live(c,context)
@@ -115,15 +117,15 @@ async def execute(context: ToolContext, name: str, args: dict, wait_decision):
                     tool_audit.approve_from_run_grant(c,call);status='approved'
                 else:
                     status=tool_audit.decide(c,call,decision)
-            if not granted and decision=='approve' and name not in ('mcp_call','create_handoff','attach_mission_result','read_work_file','web_search','computer_shell'): context.run_grants.add(name)
+            if not granted and decision=='approve' and name not in ('mcp_call','create_handoff','attach_mission_result','read_work_file','web_search','computer_shell','computer_action'): context.run_grants.add(name)
             context.notify({'type':'tool.decision','call_id':call,'decision':decision,'status':status})
             if status=='denied': return {'status':'denied','message':'The owner denied this tool call.'}
         with context.db() as c:
             c.execute('BEGIN IMMEDIATE');live(c,context)
             current=context.policy_for(c,name,row['risk'])
-            if name=='computer_shell':
+            if name in ('computer_shell','computer_action'):
                 grant=computer.permission(c,context.bot_id);reviewed=json.loads(row['arguments'])
-                if not computer.enabled() or not grant['allowed'] or grant['revision']!=reviewed['permission_revision']: current='deny'
+                if not computer.enabled() or not grant['allowed'] or grant['revision']!=reviewed['permission_revision'] or context.policy_for(c,'computer_shell','write')=='deny' or (name=='computer_action' and (not computer.desktop_enabled() or not context.vision)): current='deny'
             if name=='mcp_call':
                 reviewed=json.loads(row['arguments']);latest=context.connector_info(c,reviewed['connector_id'])
                 if not latest or not latest.get('enabled') or reviewed['tool_name'] not in latest.get('allowed_tools',[]) or latest.get('revision')!=reviewed['connector_revision'] or latest.get('url')!=reviewed['endpoint']: current='deny'
@@ -152,8 +154,13 @@ async def execute(context: ToolContext, name: str, args: dict, wait_decision):
             context.notify({'type':'tool.decision','call_id':call,'decision':'policy_denied','status':'denied'})
             return {'status':'denied','message':'Tool policy changed before execution.'}
         safe_args=json.loads(row['arguments'])
+        screenshot=None
         try:
-            if name=='computer_shell':
+            if name=='computer_action':
+                body=tools.ReviewedComputerActionArgs.model_validate(safe_args)
+                action=body.model_dump(exclude_none=True,exclude={'permission_revision'})
+                result,screenshot=await computer.desktop_action(context,body.permission_revision,action)
+            elif name=='computer_shell':
                 body=tools.ReviewedComputerArgs.model_validate(safe_args)
                 result=await computer.execute(context,body.command,body.permission_revision)
             elif name=='mcp_call':
@@ -189,14 +196,16 @@ async def execute(context: ToolContext, name: str, args: dict, wait_decision):
                     c.execute("INSERT INTO followups VALUES (?,?,?,?,?,'open',?,?)",(followup_id,context.bot_id,context.run_id,summary,timestamp,now,now))
                 result={'id':followup_id,'due_at':timestamp}
             else: raise tools.ToolError('Unknown tool.')
-            success=True
+            success=not (name=='computer_action' and isinstance(result,dict) and 'error' in result)
         except tools.ToolError as exc:
             result={'error':str(exc)};success=False
         with context.db() as c:
             c.execute('BEGIN IMMEDIATE');tool_audit.finish(c,call,result,success,context.redact)
             stored=json.loads(c.execute('SELECT result FROM tool_calls WHERE id=?',(call,)).fetchone()['result'])
         context.notify({'type':'tool.finished','call_id':call,'status':'completed' if success else 'failed','result':stored})
-        return {'status':'completed' if success else 'failed','result':stored}
+        outcome={'status':'completed' if success else 'failed','result':stored}
+        if screenshot is not None: outcome['_desktop_screenshot']=screenshot
+        return outcome
     except (asyncio.CancelledError, Exception):
         # A call in progress is never automatically replayed after interruption.
         with context.db() as c:

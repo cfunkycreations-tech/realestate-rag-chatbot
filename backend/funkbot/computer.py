@@ -36,6 +36,9 @@ async def send_input(run_id,event):
     if now-_last_input<.1: raise ToolError('Desktop input is too frequent.')
     _last_input=now
     try:
+        if _active.get('mode')=='session':
+            if not _active.get('takeover'): raise ToolError('Take over the desktop before sending input.')
+            event={'type':'owner_input','event':event}
         _channel.write(json.dumps(event,separators=(',',':')).encode()+b'\n')
         await _channel.drain()
     except (OSError,ConnectionError): raise ToolError('Desktop connection closed.') from None
@@ -160,3 +163,150 @@ async def execute(context,command,expected_revision):
             if writer:
                 try: await writer.wait_closed()
                 except OSError: pass
+
+
+# One desktop session per backend process; its connection owns the worker until
+# close/timeout. The same lock excludes legacy shell commands and other Bots.
+_session=None
+_session_start_lock=asyncio.Lock()
+_ended_sessions=set()
+
+
+def _decode_frame(value):
+    try:
+        image=base64.b64decode(value,validate=True)
+        if len(image)>1024*1024 or not image.startswith(b'\x89PNG\r\n\x1a\n'): raise ValueError()
+        return image
+    except (ValueError,TypeError,binascii.Error): raise ToolError('Invalid desktop frame.') from None
+
+
+class DesktopSession:
+    def __init__(self,context,revision,reader,writer):
+        self.context=context;self.revision=revision;self.reader=reader;self.writer=writer
+        self.pending={};self.operation=asyncio.Lock();self.available=asyncio.Event();self.available.set()
+        self.closed=asyncio.Event();self.task=None
+
+    async def read(self):
+        global _active,_channel,_frame,_session
+        try:
+            while True:
+                line=await self.reader.readline()
+                if not line or len(line)>snapshots.MAX_JSON+100000: raise ToolError('Desktop session disconnected.')
+                message=json.loads(line)
+                if not isinstance(message,dict): raise ToolError('Invalid desktop response.')
+                if set(message)=={'frame'}:
+                    _frame=_decode_frame(message['frame']);continue
+                if message.get('session')=='ended':
+                    with self.context.db() as c:
+                        c.execute('BEGIN IMMEDIATE')
+                        row=c.execute('SELECT status,bot_id FROM runs WHERE id=?',(self.context.run_id,)).fetchone()
+                        grant=permission(c,self.context.bot_id)
+                        if row and row['bot_id']==self.context.bot_id and row['status'] in ('running','waiting_approval','done') and grant['allowed'] and grant['revision']==self.revision:
+                            persist_workspace(c,self.context.bot_id,message['workspace'])
+                    break
+                if 'id' in message:
+                    if 'frame' in message: _frame=_decode_frame(message['frame'])
+                    future=self.pending.pop(message['id'],None)
+                    if future and not future.done(): future.set_result(message)
+                    continue
+                raise ToolError('Desktop session failed; an action may have run.')
+        except (OSError,ValueError,KeyError,TypeError,ToolError,asyncio.CancelledError):
+            pass
+        finally:
+            for future in self.pending.values():
+                if not future.done(): future.set_exception(ToolError('Desktop session ended; an action may have run.'))
+            self.pending.clear();self.available.set();self.closed.set()
+            self.writer.close()
+            _ended_sessions.add(self.context.run_id)
+            if _session is self:
+                _session=None;_active=None;_channel=None;_frame=None
+                _lock.release()
+
+    async def request(self,body):
+        import uuid
+        identifier=uuid.uuid4().hex
+        future=asyncio.get_running_loop().create_future();self.pending[identifier]=future
+        try:
+            self.writer.write(json.dumps({**body,'id':identifier},ensure_ascii=True,separators=(',',':')).encode()+b'\n')
+            await self.writer.drain()
+            async with asyncio.timeout(25): return await future
+        except (OSError,TimeoutError):
+            self.writer.close()
+            raise ToolError('Desktop request interrupted; the action may have run.') from None
+        finally: self.pending.pop(identifier,None)
+
+    async def action(self,action):
+        while True:
+            await self.available.wait()
+            async with self.operation:
+                if self.closed.is_set(): raise ToolError('Desktop session ended.')
+                if not self.available.is_set(): continue
+                check_live(self.context,self.revision)
+                response=await self.request({'type':'action','action':action})
+                if 'frame' not in response: raise ToolError('Action may have run, but no screenshot was returned.')
+                result=response.get('result',{}) if response.get('ok') else {'error':str(response.get('error','Desktop action failed.'))[:1000]}
+                return result,_decode_frame(response['frame'])
+
+    async def takeover(self,enabled):
+        async with self.operation:
+            if self.closed.is_set(): raise ToolError('Desktop session ended.')
+            check_live(self.context,self.revision)
+            response=await self.request({'type':'takeover','enabled':enabled})
+            if not response.get('ok') or response.get('takeover') is not enabled: raise ToolError('Could not change desktop control.')
+            if enabled: self.available.clear()
+            else: self.available.set()
+            if _active and _active['run_id']==self.context.run_id: _active['takeover']=enabled
+
+
+async def get_session(context,revision):
+    global _active,_channel,_frame,_session
+    if not desktop_enabled(): raise ToolError('Desktop sessions are disabled.')
+    async with _session_start_lock:
+        if _session and _session.context.run_id==context.run_id:
+            if _session.revision!=revision: raise ToolError('Computer permission changed.')
+            return _session
+        if context.run_id in _ended_sessions: raise ToolError('This desktop session ended; start a new Bot response.')
+        if _lock.locked(): raise ToolError('Computer sandbox is busy.')
+        await _lock.acquire();writer=None
+        try:
+            _active={'run_id':context.run_id,'bot_id':context.bot_id,'mode':'session','takeover':False}
+            _frame=None
+            workspace=load_workspace(context)
+            reader,writer=await ready_connection();check_live(context,revision)
+            writer.write(json.dumps({'mode':'session','workspace':workspace},separators=(',',':')).encode()+b'\n');await writer.drain()
+            line=await asyncio.wait_for(reader.readline(),30)
+            if json.loads(line)!= {'session':'started'}: raise ToolError('Desktop session could not start.')
+            session=DesktopSession(context,revision,reader,writer);_session=session;_channel=writer
+            session.task=asyncio.create_task(session.read())
+            return session
+        except BaseException as exc:
+            if writer: writer.close()
+            _ended_sessions.add(context.run_id)
+            _active=None;_channel=None;_frame=None;_lock.release()
+            if isinstance(exc,(OSError,TimeoutError,ValueError)): raise ToolError('Desktop session failed to start.') from exc
+            raise
+
+
+async def desktop_action(context,revision,action):
+    session=await get_session(context,revision)
+    return await session.action(action)
+
+
+async def set_takeover(run_id,enabled):
+    if not _session or _session.context.run_id!=run_id: raise ToolError('No matching desktop session.')
+    await _session.takeover(enabled)
+
+
+async def end_session(run_id,graceful):
+    session=_session
+    if session and session.context.run_id==run_id:
+        if graceful:
+            try:
+                session.writer.write(b'{"type":"close"}\n');await session.writer.drain()
+                await asyncio.wait_for(session.closed.wait(),10)
+            except (OSError,TimeoutError): session.writer.close()
+        else: session.writer.close()
+        if not session.closed.is_set():
+            try: await asyncio.wait_for(session.closed.wait(),3)
+            except TimeoutError: session.task.cancel()
+    _ended_sessions.discard(run_id)
