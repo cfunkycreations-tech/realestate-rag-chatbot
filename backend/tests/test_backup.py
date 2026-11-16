@@ -34,6 +34,7 @@ def test_backup_restore_roundtrip_is_staged_and_preserves_current_installation()
         with service.db() as db:
             db.execute("INSERT INTO bot_dm_messages VALUES ('dm-msg',?,NULL,?,'sender','Saved message',NULL,1)",(dm,bot))
         assert c.post(f'/api/bots/{bot}/computer/files',files={'file':('sandbox.txt',b'computer data')}).status_code==200
+        assert c.put(f'/api/bots/{bot}/computer/permission',json={'allowed':True,'expected_revision':0}).status_code==200
         workflow=c.post('/api/workflows',json={'name':'Reusable','bot_id':bot,'steps':['Original']}).json()['id']
         assert c.put(f'/api/workflows/{workflow}',json={'name':'Reusable','bot_id':bot,'steps':['Corrected'],'expected_version':1}).status_code==200
         workspace=service.DATA/'workspaces'/bot;workspace.mkdir(parents=True);(workspace/'note.txt').write_text('precious note')
@@ -54,6 +55,7 @@ def test_backup_restore_roundtrip_is_staged_and_preserves_current_installation()
         with sqlite3.connect(stage/'funk.db') as db:
             assert db.execute('select name from bots order by name').fetchall()==[('Original',),('Other',)]
             assert db.execute('select content from bot_dm_messages').fetchone()[0]=='Saved message'
+            assert db.execute('SELECT allowed,revision FROM computer_permissions WHERE bot_id=?',(bot,)).fetchone()==(1,1)
             snapshot=json.loads(db.execute('SELECT snapshot FROM computer_workspaces WHERE bot_id=?',(bot,)).fetchone()[0])
             assert base64.b64decode(snapshot['files']['sandbox.txt']['data'])==b'computer data'
             assert db.execute('select version,steps from workflow_versions order by version').fetchall()==[(1,'["Original"]'),(2,'["Corrected"]')]
@@ -136,6 +138,6 @@ def test_restore_upgrades_older_snapshot_only_in_isolated_stage(tmp_path):
         r=c.post('/api/workspace/restore',content=out.getvalue(),headers={'content-type':'application/zip'});assert r.status_code==200,r.text
         stage=service.DATA/'restores'/r.json()['staged_id']
         with sqlite3.connect(stage/'funk.db') as db:
-            assert db.execute('SELECT version_num FROM alembic_version').fetchone()[0]=='0024_computer_workspaces'
+            assert db.execute('SELECT version_num FROM alembic_version').fetchone()[0]=='0025_computer_permissions'
             assert db.execute('SELECT name FROM bots').fetchone()[0]=='Preserved'
         with sqlite3.connect(old/'funk.db') as db: assert db.execute('SELECT version_num FROM alembic_version').fetchone()[0]=='0019_attachments'

@@ -21,7 +21,7 @@ export function sidebarCollections<T extends TeamBot>(bots:T[]){
 }
 export function describeEvent(e:TeamEvent,names:Map<string,string>){
  const name=e.bot_id?(names.get(e.bot_id)||'Bot'):'Team';
- switch(e.type){case 'handoff.created':return `${name} handed off to ${names.get(String(e.payload.to_bot_id))||'Bot'}: ${String(e.payload.summary||'')}`;case 'message.sent':return `${name}: ${String(e.payload.summary||'')}`;case 'run.started':return `${name} started a run.`;case 'run.finished':return `${name} finished: ${String(e.payload.status||'unknown')}.`;case 'bot.state_changed':return `${name}: ${String(e.payload.state||'unknown')}.`;case 'error.raised':return `${name}: ${String(e.payload.message||'A run failed.')}`;default:return `${name}: ${e.type}`}
+ switch(e.type){case 'computer.permission_changed':return `${name}: computer access ${e.payload.allowed?'allowed':'revoked'} (revision ${String(e.payload.revision)}).`;case 'handoff.created':return `${name} handed off to ${names.get(String(e.payload.to_bot_id))||'Bot'}: ${String(e.payload.summary||'')}`;case 'message.sent':return `${name}: ${String(e.payload.summary||'')}`;case 'run.started':return `${name} started a run.`;case 'run.finished':return `${name} finished: ${String(e.payload.status||'unknown')}.`;case 'bot.state_changed':return `${name}: ${String(e.payload.state||'unknown')}.`;case 'error.raised':return `${name}: ${String(e.payload.message||'A run failed.')}`;default:return `${name}: ${e.type}`}
 }
 export function timeLabel(value:number|null){return value?new Date(value*1000).toLocaleString():'No recorded activity'}
 export function useOverview(enabled:boolean,botId=''){

@@ -30,7 +30,7 @@ from cryptography.fernet import Fernet, InvalidToken
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from itsdangerous import BadSignature, URLSafeTimedSerializer
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from PIL import Image, UnidentifiedImageError
 from sqlalchemy.exc import IntegrityError
 from funkbot.database import migrate, session
@@ -566,6 +566,42 @@ def computer_not_busy(c,bot_id):
 def computer_workspace(c,bot_id):
     try: return computer.read_workspace(c,bot_id)
     except ToolError as exc: raise HTTPException(400,str(exc)) from exc
+
+
+class ComputerPermissionIn(BaseModel):
+    model_config=ConfigDict(extra='forbid')
+    allowed: bool = Field(strict=True)
+    expected_revision: int = Field(ge=0,strict=True)
+
+
+@app.get('/api/bots/{bot_id}/computer/permission')
+def get_computer_permission(bot_id: str,request: Request):
+    require_auth(request)
+    with db() as c:
+        computer_bot_exists(c,bot_id)
+        return {**computer.permission(c,bot_id),'service_enabled':computer.enabled()}
+
+
+@app.put('/api/bots/{bot_id}/computer/permission')
+async def set_computer_permission(bot_id: str,body: ComputerPermissionIn,request: Request):
+    require_auth(request)
+    changed=False
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE');computer_bot_exists(c,bot_id)
+        grant=computer.permission(c,bot_id)
+        if grant['revision']!=body.expected_revision: raise HTTPException(409,'Computer permission changed; reload before saving.')
+        if grant['allowed']!=body.allowed:
+            revision=grant['revision']+1;changed=True
+            c.execute('INSERT INTO computer_permissions VALUES (?,?,?,?) ON CONFLICT(bot_id) DO UPDATE SET allowed=excluded.allowed,revision=excluded.revision,updated_at=excluded.updated_at',(bot_id,int(body.allowed),revision,time.time()))
+            append_event(c,bot_id,None,'computer.permission_changed',{'allowed':body.allowed,'revision':revision})
+            grant={'allowed':body.allowed,'revision':revision}
+    stop_requested=False
+    if changed and not body.allowed:
+        active=computer.active_info()
+        job=jobs.get(active['run_id']) if active and active['bot_id']==bot_id else None
+        if job and not job['done'] and job.get('task'):
+            job['user_cancelled']=True;job['task'].cancel();stop_requested=True
+    return {**grant,'service_enabled':computer.enabled(),'stop_requested':stop_requested}
 
 
 @app.get('/api/bots/{bot_id}/computer/files')
@@ -1385,7 +1421,7 @@ def tool_event(job, item):
 async def run_chat(job, bot, history, profile):
     entries=job.get('entries') or json.loads(config('profiles')).get(profile,[])
     messages=[{'role':'system','content':bot_system_prompt(bot)},*history]
-    tool_definitions=declarations(bool(bot.get('connector_catalog')),bool(bot.get('handoff_catalog')),bool(job.get('mission_id')),bool(bot.get('search_enabled')),computer.enabled()) if 'id' in job and not job.get('lab_step_id') else []
+    tool_definitions=declarations(bool(bot.get('connector_catalog')),bool(bot.get('handoff_catalog')),bool(job.get('mission_id')),bool(bot.get('search_enabled')),bool(bot.get('computer_enabled'))) if 'id' in job and not job.get('lab_step_id') else []
     complete_text=''
     try:
         for round_number in range(5):
@@ -1540,6 +1576,7 @@ async def start_chat(bot_id: str, body: ChatIn, mission_id: str | None = None, g
                     memory.append(text);memory_size+=len(text)
         bot['memory']=[] if lab_step_id else memory
         bot['search_enabled']=not lab_step_id and bool(search_provider_info(c))
+        bot['computer_enabled']=not lab_step_id and computer.enabled() and computer.permission(c,bot_id)['allowed']
         bot['connector_catalog']=[] if lab_step_id else [{'id':x['id'],'name':redact_text(x['name'],keys),'tools':[redact_text(t,keys) for t in x['tools']]} for x in connector_catalog(c)]
         bot['handoff_catalog']=[] if lab_step_id else [{'id':r['id'],'name':redact_text(r['name'],keys),'title':redact_text(r['title'],keys)} for r in c.execute('SELECT id,name,title FROM bots WHERE id<>? ORDER BY created_at,id LIMIT 20',(bot_id,))]
         now=time.time()
@@ -1576,7 +1613,7 @@ async def start_chat(bot_id: str, body: ChatIn, mission_id: str | None = None, g
         if price:
             # Conservative byte estimate with protocol overhead, not a guarantee
             # for unknown tokenizers or gateways that add unreported tokens.
-            bound = prompt_bound([{'role':'system','content':bot_system_prompt(bot)},*history],[] if lab_step_id else declarations(bool(bot.get('connector_catalog')),bool(bot.get('handoff_catalog')),bool(mission_id),bool(bot.get('search_enabled')),computer.enabled()))
+            bound = prompt_bound([{'role':'system','content':bot_system_prompt(bot)},*history],[] if lab_step_id else declarations(bool(bot.get('connector_catalog')),bool(bot.get('handoff_catalog')),bool(mission_id),bool(bot.get('search_enabled')),bool(bot.get('computer_enabled'))))
             if bound > price['max_prompt_tokens']:
                 raise HTTPException(400, 'Message and conversation exceed the configured prompt token safety bound for this profile.')
         try:

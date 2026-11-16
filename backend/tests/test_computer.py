@@ -12,9 +12,15 @@ from pydantic import ValidationError
 import app as service
 from funkbot import computer, computer_snapshot as snapshots, tool_protocol, tools
 from funkbot.tool_runtime import execute
-from test_tool_runtime import make_context
+from test_tool_runtime import make_context as make_base_context
 from test_app import FakeClient, setup, configure_budget
 from test_live_tools import tool_reply, final_reply, until_calls, get_events
+
+
+def make_context(tmp_path):
+    ctx,events=make_base_context(tmp_path)
+    with service.db() as db: db.execute('INSERT INTO computer_permissions VALUES (?,1,1,?)',(ctx.bot_id,1))
+    return ctx,events
 
 
 def test_opt_in_and_command_validation(monkeypatch):
@@ -29,7 +35,7 @@ def test_opt_in_and_command_validation(monkeypatch):
 async def test_individual_approval_and_policy_recheck(tmp_path,monkeypatch):
     monkeypatch.setenv('FUNK_COMPUTER_ENABLED','1')
     ctx,events=make_context(tmp_path);calls=[];decisions=[]
-    async def worker(context,command):
+    async def worker(context,command,revision):
         calls.append(command)
         return {'output':'secret output','truncated':False,'exit_code':0,'timed_out':False}
     monkeypatch.setattr(computer,'execute',worker)
@@ -62,18 +68,18 @@ async def test_unix_client_protocol_and_failure(tmp_path,monkeypatch):
         await writer.drain();writer.close();await writer.wait_closed()
     server=await asyncio.start_unix_server(handler,computer.SOCKET)
     async with server:
-        assert (await computer.execute(ctx,'printf ok'))['output']=='ok'
+        assert (await computer.execute(ctx,'printf ok',1))['output']=='ok'
         assert received==[{'command':'printf ok','workspace':{'dirs':[],'files':{}}}]
     monkeypatch.setattr(computer,'SOCKET',str(tmp_path/'missing'))
     async def unavailable(): raise tools.ToolError('Computer sandbox is unavailable; no command was sent.')
     monkeypatch.setattr(computer,'ready_connection',unavailable)
-    with pytest.raises(tools.ToolError,match='no command was sent'): await computer.execute(ctx,'pwd')
+    with pytest.raises(tools.ToolError,match='no command was sent'): await computer.execute(ctx,'pwd',1)
 
 
 def test_live_approval_is_individual_and_audited(monkeypatch):
     monkeypatch.setenv('FUNK_COMPUTER_ENABLED','1')
     calls=[]
-    async def worker(context,command):
+    async def worker(context,command,revision):
         calls.append(command);return {'output':'done','truncated':False,'exit_code':0,'timed_out':False}
     monkeypatch.setattr(computer,'execute',worker)
     FakeClient.responses=[tool_reply('computer_shell',{'command':'echo hello'}),final_reply()]
@@ -81,9 +87,10 @@ def test_live_approval_is_individual_and_audited(monkeypatch):
     with TestClient(service.app) as client:
         setup(client);configure_budget(client)
         bot=client.post('/api/bots',json={'name':'Computer user'}).json()['id']
+        assert client.put(f'/api/bots/{bot}/computer/permission',json={'allowed':True,'expected_revision':0}).status_code==200
         run=client.post(f'/api/bots/{bot}/chat',json={'content':'Run a command'}).json()['job_id']
         call=until_calls(client,run)[0]
-        assert call['status']=='pending' and call['arguments']=={'command':'echo hello'} and not calls
+        assert call['status']=='pending' and call['arguments']=={'command':'echo hello','permission_revision':1} and not calls
         assert client.post(f'/api/jobs/{run}/tool-calls/{call["id"]}/decision',json={'decision':'approve'}).status_code==400
         assert client.post(f'/api/jobs/{run}/tool-calls/{call["id"]}/decision',json={'decision':'approve_once'}).status_code==200
         assert get_events(client,run)[-1]['type']=='done' and calls==['echo hello']
@@ -174,9 +181,9 @@ async def test_persistent_per_bot_snapshots_through_mock_worker(tmp_path,monkeyp
     server=await asyncio.start_unix_server(handler,computer.SOCKET,limit=snapshots.MAX_JSON+100000)
     bot1,_=make_context(tmp_path);bot2,_=make_context(tmp_path)
     async with server:
-        assert (await computer.execute(bot1,'mkdir folder; echo hello > folder/note.txt'))['exit_code']==0
-        assert (await computer.execute(bot1,'cat folder/note.txt'))['output']=='hello\n'
-        assert (await computer.execute(bot2,'test ! -e folder && echo separate'))['output']=='separate\n'
+        assert (await computer.execute(bot1,'mkdir folder; echo hello > folder/note.txt',1))['exit_code']==0
+        assert (await computer.execute(bot1,'cat folder/note.txt',1))['output']=='hello\n'
+        assert (await computer.execute(bot2,'test ! -e folder && echo separate',1))['output']=='separate\n'
     assert len(calls)==3
     with service.db() as c:
         assert c.execute('SELECT COUNT(*) FROM computer_workspaces').fetchone()[0]==2
@@ -224,7 +231,7 @@ async def test_bad_worker_snapshot_preserves_previous_state(tmp_path,monkeypatch
         writer.write(json.dumps(result).encode()+b'\n');await writer.drain();writer.close();await writer.wait_closed()
     server=await asyncio.start_unix_server(handler,computer.SOCKET,limit=snapshots.MAX_JSON+100000)
     async with server:
-        with pytest.raises(tools.ToolError,match='previous workspace was retained'): await computer.execute(ctx,'pwd')
+        with pytest.raises(tools.ToolError,match='previous workspace was retained'): await computer.execute(ctx,'pwd',1)
     with service.db() as db: assert computer.read_workspace(db,ctx.bot_id)==original
 
 
@@ -251,7 +258,7 @@ async def test_policy_is_checked_after_worker_handshake(tmp_path,monkeypatch):
         writer.close();await writer.wait_closed()
     server=await asyncio.start_unix_server(handler,computer.SOCKET)
     async with server:
-        with pytest.raises(tools.ToolError,match='policy changed'): await computer.execute(ctx,'must not run')
+        with pytest.raises(tools.ToolError,match='policy changed'): await computer.execute(ctx,'must not run',1)
         await asyncio.sleep(.01)
     assert received==[b'']
 
@@ -295,7 +302,7 @@ def test_worker_disconnect_interrupts_running_shell(tmp_path,monkeypatch):
     finally: client.close();server.close();thread.join(timeout=3)
 
 
-@pytest.mark.parametrize('mode',['computer','job','pause'])
+@pytest.mark.parametrize('mode',['computer','job','pause','revoke'])
 def test_stop_disconnects_inflight_worker_and_preserves_snapshot(tmp_path,monkeypatch,mode):
     import socket
     import threading
@@ -319,6 +326,7 @@ def test_stop_disconnects_inflight_worker_and_preserves_snapshot(tmp_path,monkey
             assert client.post('/api/control/computer/stop',json={'run_id':'x'}).status_code==401
             setup(client);configure_budget(client)
             bot=client.post('/api/bots',json={'name':'Stopper'}).json()['id']
+            assert client.put(f'/api/bots/{bot}/computer/permission',json={'allowed':True,'expected_revision':0}).status_code==200
             assert client.post(f'/api/bots/{bot}/computer/files',files={'file':('before.txt',b'kept')}).status_code==200
             run=client.post(f'/api/bots/{bot}/chat',json={'content':'Run'}).json()['job_id'];call=until_calls(client,run)[0]
             assert client.post(f'/api/jobs/{run}/tool-calls/{call["id"]}/decision',json={'decision':'approve_once'}).status_code==200
@@ -328,6 +336,13 @@ def test_stop_disconnects_inflight_worker_and_preserves_snapshot(tmp_path,monkey
             assert not disconnected.is_set()
             if mode=='computer': assert client.post('/api/control/computer/stop',json={'run_id':run}).json()=={'requested':True}
             elif mode=='job': assert client.post(f'/api/jobs/{run}/stop').status_code==200
+            elif mode=='revoke':
+                other=client.post('/api/bots',json={'name':'Other'}).json()['id'];other_path=f'/api/bots/{other}/computer/permission'
+                assert client.put(other_path,json={'allowed':True,'expected_revision':0}).status_code==200
+                assert client.put(other_path,json={'allowed':False,'expected_revision':1}).json()['stop_requested'] is False
+                assert not disconnected.is_set()
+                revoke=client.put(f'/api/bots/{bot}/computer/permission',json={'allowed':False,'expected_revision':1})
+                assert revoke.status_code==200 and revoke.json()['stop_requested'] is True
             else: assert client.put('/api/control/pause',json={'paused':True}).status_code==200
             assert disconnected.wait(5)
             assert get_events(client,run)[-1]['type']=='error'
@@ -339,3 +354,119 @@ def test_stop_disconnects_inflight_worker_and_preserves_snapshot(tmp_path,monkey
     finally:
         listener.close();thread.join(timeout=10)
     assert errors==[]
+
+
+def test_per_bot_computer_permissions_default_deny_revisioned_and_audited(monkeypatch):
+    monkeypatch.setenv('FUNK_COMPUTER_ENABLED','1')
+    with TestClient(service.app) as client:
+        assert client.get('/api/bots/no/computer/permission').status_code==401
+        setup(client)
+        bot=client.post('/api/bots',json={'name':'First'}).json()['id']
+        other=client.post('/api/bots',json={'name':'Second'}).json()['id']
+        path=f'/api/bots/{bot}/computer/permission'
+        assert client.get(path).json()=={'allowed':False,'revision':0,'service_enabled':True}
+        granted=client.put(path,json={'allowed':True,'expected_revision':0})
+        assert granted.json()=={'allowed':True,'revision':1,'service_enabled':True,'stop_requested':False}
+        assert client.get(f'/api/bots/{other}/computer/permission').json()['allowed'] is False
+        assert client.put(path,json={'allowed':False,'expected_revision':0}).status_code==409
+        assert client.put(path,json={'allowed':'true','expected_revision':1}).status_code==422
+        assert client.put(path,json={'allowed':True,'expected_revision':1,'other':'bad'}).status_code==422
+        assert client.put(path,json={'allowed':True,'expected_revision':1}).json()['revision']==1
+        assert client.put(path,json={'allowed':False,'expected_revision':1}).json()['revision']==2
+        events=client.get('/api/events?since=0').json()['events']
+        changes=[e for e in events if e['type']=='computer.permission_changed']
+        assert [e['payload'] for e in changes]==[{'allowed':True,'revision':1},{'allowed':False,'revision':2}]
+        duplicate=client.post(f'/api/bots/{bot}/duplicate').json()['id']
+        assert client.get(f'/api/bots/{duplicate}/computer/permission').json()['allowed'] is False
+        assert client.delete(f'/api/bots/{bot}').status_code==200
+        with service.db() as db: assert not db.execute('SELECT 1 FROM computer_permissions WHERE bot_id=?',(bot,)).fetchone()
+
+
+@pytest.mark.asyncio
+async def test_unauthorized_bot_denied_even_if_model_invents_tool(tmp_path,monkeypatch):
+    monkeypatch.setenv('FUNK_COMPUTER_ENABLED','1')
+    ctx,events=make_base_context(tmp_path)
+    async def never(*_): pytest.fail('Unpermitted Bot must not request approval or execute.')
+    monkeypatch.setattr(computer,'execute',never)
+    result=await execute(ctx,'computer_shell',{'command':'pwd'},never)
+    assert result['status']=='denied' and events[0]['arguments']['permission_revision']==0
+
+
+def test_revoke_then_reallow_invalidates_pending_command(monkeypatch):
+    monkeypatch.setenv('FUNK_COMPUTER_ENABLED','1')
+    calls=[]
+    async def worker(context,command,revision): calls.append(command)
+    monkeypatch.setattr(computer,'execute',worker)
+    FakeClient.responses=[tool_reply('computer_shell',{'command':'pwd'}),final_reply()]
+    monkeypatch.setattr(service.httpx,'AsyncClient',FakeClient)
+    with TestClient(service.app) as client:
+        setup(client);configure_budget(client)
+        bot=client.post('/api/bots',json={'name':'Restricted'}).json()['id'];path=f'/api/bots/{bot}/computer/permission'
+        assert client.put(path,json={'allowed':True,'expected_revision':0}).status_code==200
+        run=client.post(f'/api/bots/{bot}/chat',json={'content':'Use the computer'}).json()['job_id'];call=until_calls(client,run)[0]
+        assert call['status']=='pending' and call['arguments']['permission_revision']==1
+        assert client.put(path,json={'allowed':False,'expected_revision':1}).status_code==200
+        assert client.put(path,json={'allowed':True,'expected_revision':2}).status_code==200
+        assert client.post(f'/api/jobs/{run}/tool-calls/{call["id"]}/decision',json={'decision':'approve_once'}).status_code==200
+        assert get_events(client,run)[-1]['type']=='done'
+        call=client.get(f'/api/jobs/{run}/tool-calls').json()[0]
+        assert call['status']=='denied' and 'policy_denied' in [e['action'] for e in call['audit']] and calls==[]
+
+
+@pytest.mark.asyncio
+async def test_permission_rechecked_after_handshake(tmp_path,monkeypatch):
+    monkeypatch.setenv('FUNK_COMPUTER_ENABLED','1');monkeypatch.setattr(computer,'SOCKET',str(tmp_path/'socket'))
+    ctx,_=make_context(tmp_path);received=[]
+    async def handler(reader,writer):
+        with service.db() as db: db.execute('UPDATE computer_permissions SET allowed=0,revision=2 WHERE bot_id=?',(ctx.bot_id,))
+        writer.write(b'{"ready":1}\n');await writer.drain();received.append(await reader.read());writer.close();await writer.wait_closed()
+    server=await asyncio.start_unix_server(handler,computer.SOCKET)
+    async with server:
+        with pytest.raises(tools.ToolError,match='policy changed'): await computer.execute(ctx,'never sent',1)
+        await asyncio.sleep(.01)
+    assert received==[b'']
+
+
+def test_tool_declaration_reflects_bot_permission(monkeypatch):
+    monkeypatch.setenv('FUNK_COMPUTER_ENABLED','1');captured=[]
+    class Client(FakeClient):
+        def stream(self,*args,**kwargs):
+            captured.append(kwargs['json'])
+            return super().stream(*args,**kwargs)
+    FakeClient.responses=[tool_reply('computer_shell',{'command':'pwd'}),final_reply(),final_reply()]
+    monkeypatch.setattr(service.httpx,'AsyncClient',Client)
+    with TestClient(service.app) as client:
+        setup(client);configure_budget(client)
+        bot=client.post('/api/bots',json={'name':'Tools'}).json()['id']
+        first=client.post(f'/api/bots/{bot}/chat',json={'content':'Try'}).json()['job_id']
+        get_events(client,first)
+        assert client.get(f'/api/jobs/{first}/tool-calls').json()[0]['status']=='denied'
+        assert 'computer_shell' not in [t['function']['name'] for t in captured[0]['tools']]
+        assert client.put(f'/api/bots/{bot}/computer/permission',json={'allowed':True,'expected_revision':0}).status_code==200
+        second=client.post(f'/api/bots/{bot}/chat',json={'content':'Again'}).json()['job_id']
+        get_events(client,second)
+        computer_tool=next(t['function'] for t in captured[-1]['tools'] if t['function']['name']=='computer_shell')
+        assert set(computer_tool['parameters']['properties'])=={'command'}
+
+
+def test_permission_migration_preserves_existing_computer_workspace(tmp_path):
+    from alembic import command
+    from alembic.config import Config
+    from funkbot.database import engine_for
+    engine=engine_for(str(tmp_path/'old-computer.db'))
+    with engine.connect() as conn:
+        cfg=Config();cfg.set_main_option('script_location',str(Path(service.__file__).parent/'funkbot'/'migrations'));cfg.attributes['connection']=conn
+        command.upgrade(cfg,'0024_computer_workspaces');conn.commit()
+        conn.exec_driver_sql("INSERT INTO bots VALUES ('b','Existing','Editor','instructions','mint','round','smart',1)")
+        conn.exec_driver_sql("INSERT INTO computer_workspaces VALUES ('b',?,1)",(json.dumps({'dirs':[],'files':{}}),));conn.commit()
+        command.upgrade(cfg,'head');conn.commit()
+        assert conn.exec_driver_sql('SELECT version_num FROM alembic_version').scalar()=='0025_computer_permissions'
+        assert conn.exec_driver_sql('SELECT COUNT(*) FROM computer_workspaces').scalar()==1
+        assert conn.exec_driver_sql('SELECT COUNT(*) FROM computer_permissions').scalar()==0
+
+
+def test_model_cannot_set_internal_permission_revision():
+    from funkbot.tool_protocol import CallAccumulator
+    acc=CallAccumulator()
+    acc.feed({'tool_calls':[{'index':0,'id':'call','function':{'name':'computer_shell','arguments':json.dumps({'command':'pwd','permission_revision':999})}}]})
+    with pytest.raises(tools.ToolError,match='Invalid tool arguments'): acc.finalize()

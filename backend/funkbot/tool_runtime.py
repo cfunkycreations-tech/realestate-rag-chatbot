@@ -55,7 +55,11 @@ async def execute(context: ToolContext, name: str, args: dict, wait_decision):
         if not spec: raise tools.ToolError('Unknown tool.')
         policy=context.policy_for(c,name,spec.risk)
         connector=None
-        if name=='computer_shell' and not computer.enabled(): policy='deny'
+        if name=='computer_shell':
+            parsed=tools.ComputerArgs.model_validate(args)
+            grant=computer.permission(c,context.bot_id)
+            args={'command':parsed.command,'permission_revision':grant['revision']}
+            if not computer.enabled() or not grant['allowed']: policy='deny'
         if name=='mcp_call':
             parsed=tools.McpCallArgs.model_validate(args)
             try: arguments=json.loads(parsed.arguments_json)
@@ -117,7 +121,9 @@ async def execute(context: ToolContext, name: str, args: dict, wait_decision):
         with context.db() as c:
             c.execute('BEGIN IMMEDIATE');live(c,context)
             current=context.policy_for(c,name,row['risk'])
-            if name=='computer_shell' and not computer.enabled(): current='deny'
+            if name=='computer_shell':
+                grant=computer.permission(c,context.bot_id);reviewed=json.loads(row['arguments'])
+                if not computer.enabled() or not grant['allowed'] or grant['revision']!=reviewed['permission_revision']: current='deny'
             if name=='mcp_call':
                 reviewed=json.loads(row['arguments']);latest=context.connector_info(c,reviewed['connector_id'])
                 if not latest or not latest.get('enabled') or reviewed['tool_name'] not in latest.get('allowed_tools',[]) or latest.get('revision')!=reviewed['connector_revision'] or latest.get('url')!=reviewed['endpoint']: current='deny'
@@ -148,7 +154,8 @@ async def execute(context: ToolContext, name: str, args: dict, wait_decision):
         safe_args=json.loads(row['arguments'])
         try:
             if name=='computer_shell':
-                result=await computer.execute(context,tools.ComputerArgs.model_validate(safe_args).command)
+                body=tools.ReviewedComputerArgs.model_validate(safe_args)
+                result=await computer.execute(context,body.command,body.permission_revision)
             elif name=='mcp_call':
                 if not context.connector_call: raise tools.ToolError('Connector execution is unavailable.')
                 result=await context.connector_call(connector,tools.McpCallArgs.model_validate(safe_args))

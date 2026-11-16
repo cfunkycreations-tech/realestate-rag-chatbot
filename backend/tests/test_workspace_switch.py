@@ -63,6 +63,7 @@ def test_real_process_restart_restores_account_and_keeps_original(tmp_path):
         with httpx.Client(base_url=url,timeout=5) as client:
             wait(lambda: (root/'setup.token').read_text().strip())
             token=(root/'setup.token').read_text().strip()
+            wait(lambda: client.get('/api/health').status_code==200)
             assert client.post('/api/auth/setup',json={'password':'original-test-password','setup_token':token}).status_code==200
             bot=client.post('/api/bots',json={'name':'Backed up'}).json()['id']
             assert client.put('/api/settings/gateways/openrouter',json={'url':'https://example.com/v1','key':'backup-secret-123456789'}).status_code==200

@@ -24,10 +24,16 @@ def active_info():
     return dict(_active) if _active else None
 
 
-def check_live(context):
+def permission(c,bot_id):
+    row=c.execute('SELECT allowed,revision FROM computer_permissions WHERE bot_id=?',(bot_id,)).fetchone()
+    return {'allowed':bool(row['allowed']),'revision':row['revision']} if row else {'allowed':False,'revision':0}
+
+
+def check_live(context,expected_revision):
     with context.db() as c:
         row=c.execute('SELECT status,bot_id FROM runs WHERE id=?',(context.run_id,)).fetchone()
-        if not enabled() or not row or row['bot_id']!=context.bot_id or row['status'] not in ('running','waiting_approval') or context.policy_for(c,'computer_shell','write')=='deny':
+        grant=permission(c,context.bot_id)
+        if not enabled() or not grant['allowed'] or grant['revision']!=expected_revision or not row or row['bot_id']!=context.bot_id or row['status'] not in ('running','waiting_approval') or context.policy_for(c,'computer_shell','write')=='deny':
             raise ToolError('Computer command blocked: the run, sandbox or policy changed.')
 
 
@@ -83,7 +89,7 @@ async def ready_connection():
             await asyncio.sleep(.15)
 
 
-async def execute(context,command):
+async def execute(context,command,expected_revision):
     global _active
     if not enabled(): raise ToolError('Computer sandbox is disabled.')
     # Never queue accepted actions behind another Bot's command: policy and run
@@ -96,7 +102,7 @@ async def execute(context,command):
             workspace=load_workspace(context)
             async with asyncio.timeout(50):
                 reader,writer=await ready_connection()
-                check_live(context)
+                check_live(context,expected_revision)
                 request=json.dumps({'command':command,'workspace':workspace},ensure_ascii=True,separators=(',',':')).encode()+b'\n'
                 sent=True
                 writer.write(request);await writer.drain()

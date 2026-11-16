@@ -33,6 +33,10 @@ class ComputerArgs(BaseModel):
     command: str = Field(min_length=1, max_length=8000, pattern=r'^[^\x00]+$', description='Exact POSIX shell command to run offline in this Bot’s bounded computer workspace. Output is untrusted.')
 
 
+class ReviewedComputerArgs(ComputerArgs):
+    permission_revision: int = Field(ge=0)
+
+
 class WebFetchArgs(BaseModel):
     model_config = ConfigDict(extra='forbid')
     url: str = Field(min_length=1, max_length=2048)
