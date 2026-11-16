@@ -29,6 +29,15 @@ def drop_privileges():
     resource.setrlimit(resource.RLIMIT_CPU, (25, 25))
 
 
+def drop_desktop_privileges():
+    # Browser/X server need more descriptors and CPU than a short shell.
+    # Compose still bounds the complete container's memory, PIDs and CPU.
+    os.setgroups([]);os.setgid(65534);os.setuid(65534)
+    resource.setrlimit(resource.RLIMIT_FSIZE,(32*1024*1024,32*1024*1024))
+    resource.setrlimit(resource.RLIMIT_NOFILE,(256,256))
+    resource.setrlimit(resource.RLIMIT_CPU,(120,120))
+
+
 def restore_as_user(data):
     # Only this child can write the fresh workspace; the server remains root.
     pid=os.fork()
@@ -153,7 +162,7 @@ def desktop_frame():
 
 
 def start_desktop(conn):
-    display=subprocess.Popen(['Xvfb',':99','-screen','0','1024x768x24','-nolisten','tcp','-noreset'],cwd=WORKSPACE,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,env={'PATH':'/usr/bin:/bin','HOME':'/tmp'},preexec_fn=drop_privileges,start_new_session=True)
+    display=subprocess.Popen(['Xvfb',':99','-screen','0','1024x768x24','-nolisten','tcp','-noreset'],cwd=WORKSPACE,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,env={'PATH':'/usr/bin:/bin','HOME':'/tmp'},preexec_fn=drop_desktop_privileges,start_new_session=True)
     env={'DISPLAY':':99','PATH':'/usr/bin:/bin','HOME':'/tmp'}
     for _ in range(30):
         if peer_disconnected(conn): raise CommandCancelled()
@@ -161,7 +170,7 @@ def start_desktop(conn):
         if check.returncode==0: break
         time.sleep(.1)
     else: raise RuntimeError('Virtual display could not start.')
-    subprocess.Popen(['openbox'],cwd=WORKSPACE,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,env=env,preexec_fn=drop_privileges,start_new_session=True)
+    subprocess.Popen(['openbox'],cwd=WORKSPACE,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,env=env,preexec_fn=drop_desktop_privileges,start_new_session=True)
     return display
 
 
@@ -276,8 +285,8 @@ def session_send(conn,body):
 def browser_reply(browser,timeout):
     ready,_,_=select.select([browser.stdout],[],[],timeout)
     if not ready: raise RuntimeError('Browser did not respond before its deadline.')
-    line=browser.stdout.readline(32000)
-    if not line or len(line)>=32000: raise RuntimeError('Browser response is invalid.')
+    line=browser.stdout.readline(150000)
+    if not line or len(line)>=150000: raise RuntimeError('Browser response is invalid.')
     response=json.loads(line)
     if not isinstance(response,dict) or type(response.get('ok')) is not bool: raise RuntimeError('Browser response is invalid.')
     return response
@@ -289,7 +298,7 @@ def serve_session(conn,workspace):
     try:
         restore_as_user(workspace);start_desktop(conn)
         proxy_port,proxy_pid=start_browser_proxy()
-        browser=subprocess.Popen(['python','-u','/session_browser.py'],cwd=WORKSPACE,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,env={'PATH':'/usr/local/bin:/usr/bin:/bin','HOME':'/tmp','TMPDIR':'/tmp','DISPLAY':':99','PYTHONUNBUFFERED':'1','FUNK_BROWSER_PROXY_PORT':str(proxy_port)},preexec_fn=drop_privileges,start_new_session=True)
+        browser=subprocess.Popen(['python','-u','/session_browser.py'],cwd=WORKSPACE,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,env={'PATH':'/usr/local/bin:/usr/bin:/bin','HOME':'/tmp','TMPDIR':'/tmp','DISPLAY':':99','PYTHONUNBUFFERED':'1','FUNK_BROWSER_PROXY_PORT':str(proxy_port)},preexec_fn=drop_desktop_privileges,start_new_session=True)
         ready,_,_=select.select([browser.stdout],[],[],20)
         if not ready or json.loads(browser.stdout.readline(4096))!={'ready':True}: raise RuntimeError('Browser failed to start.')
         session_send(conn,{'session':'started'})

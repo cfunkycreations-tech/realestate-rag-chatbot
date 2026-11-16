@@ -19,6 +19,7 @@ from .tool_policy import WebPolicy
 SOCKET='/computer-control/browser-proxy.sock'
 MAX_CONNECTIONS=12
 MAX_BYTES=20*1024*1024
+MAX_SESSION_BYTES=50*1024*1024
 
 def enabled(): return os.environ.get('FUNK_COMPUTER_BROWSER_NETWORK')=='1'
 
@@ -68,7 +69,7 @@ class Broker:
                 p=policy(c);grant=computer.permission(c,session.context.bot_id)
                 row=c.execute('SELECT status,bot_id FROM runs WHERE id=?',(session.context.run_id,)).fetchone()
                 paused=c.execute("SELECT value FROM config WHERE key='global_pause'").fetchone()
-                return bool(host in p['domains'] and session.domains.get(host)==p['revision'] and grant['allowed'] and grant['revision']==session.revision and row and row['bot_id']==session.context.bot_id and row['status'] in ('running','waiting_approval') and not (paused and paused['value']=='1') and session.context.policy_for(c,'computer_shell','write')!='deny')
+                return bool(session.network_bytes<MAX_SESSION_BYTES and host in p['domains'] and session.domains.get(host)==p['revision'] and grant['allowed'] and grant['revision']==session.revision and row and row['bot_id']==session.context.bot_id and row['status'] in ('running','waiting_approval') and not (paused and paused['value']=='1') and session.context.policy_for(c,'computer_shell','write')!='deny')
         except Exception: return False
 
     async def start(self):
@@ -114,17 +115,24 @@ class Broker:
             # the original host after CONNECT; no TLS interception is used.
             rr,remote=await asyncio.wait_for(asyncio.open_connection(ips[0],443),10)
             if not self.permitted(host): raise ValueError()
+            from . import computer
+            session=computer._session
+            if session is None: raise ValueError()
             writer.write(b'HTTP/1.1 200 Connection Established\r\n\r\n');await writer.drain()
             async def relay(src,dst):
                 total=0
                 while True:
                     data=await src.read(32768)
                     if not data: return
-                    total+=len(data)
-                    if total>MAX_BYTES: return
+                    total+=len(data);session.network_bytes+=len(data)
+                    if total>MAX_BYTES or session.network_bytes>MAX_SESSION_BYTES: return
                     dst.write(data);await dst.drain()
             async with asyncio.timeout(90):
-                await asyncio.gather(relay(reader,remote),relay(rr,writer))
+                pipes=[asyncio.create_task(relay(reader,remote)),asyncio.create_task(relay(rr,writer))]
+                try: await asyncio.wait(pipes,return_when=asyncio.FIRST_COMPLETED)
+                finally:
+                    for pipe in pipes: pipe.cancel()
+                    await asyncio.gather(*pipes,return_exceptions=True)
         except (OSError,ValueError,TimeoutError,asyncio.IncompleteReadError,asyncio.LimitOverrunError,ToolError):
             try: writer.write(b'HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');await writer.drain()
             except OSError: pass

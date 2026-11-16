@@ -57,6 +57,8 @@ async def test_each_domain_requires_approval_and_revision_recheck(tmp_path,monke
 async def test_proxy_blocks_unapproved_and_private_addresses_and_relays_pinned_public(tmp_path,monkeypatch):
     monkeypatch.setenv('FUNK_COMPUTER_BROWSER_NETWORK','1');monkeypatch.setattr(browser_network,'SOCKET',str(tmp_path/'broker.sock'))
     broker=browser_network.Broker(None);monkeypatch.setattr(broker,'permitted',lambda host:host=='example.com')
+    from types import SimpleNamespace
+    monkeypatch.setattr(computer,'_session',SimpleNamespace(network_bytes=0))
     await broker.start();loop=asyncio.get_running_loop()
     async def dns(host,port,**kwargs): return [(socket.AF_INET,socket.SOCK_STREAM,6,'',('127.0.0.1',443))]
     monkeypatch.setattr(loop,'getaddrinfo',dns)

@@ -184,7 +184,7 @@ def _decode_frame(value):
 class DesktopSession:
     def __init__(self,context,revision,reader,writer):
         self.context=context;self.revision=revision;self.reader=reader;self.writer=writer
-        self.domains={}
+        self.domains={};self.network_bytes=0
         self.pending={};self.operation=asyncio.Lock();self.available=asyncio.Event();self.available.set()
         self.closed=asyncio.Event();self.task=None
 
