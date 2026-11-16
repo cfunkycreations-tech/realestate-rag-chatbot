@@ -37,7 +37,7 @@ def test_domain_settings_are_owner_only_and_revisioned(tmp_path,monkeypatch):
 async def test_each_domain_requires_approval_and_revision_recheck(tmp_path,monkeypatch):
     monkeypatch.setenv('FUNK_COMPUTER_ENABLED','1');monkeypatch.setenv('FUNK_COMPUTER_DESKTOP_ENABLED','1');monkeypatch.setenv('FUNK_COMPUTER_BROWSER_NETWORK','1')
     ctx,_=make_context(tmp_path);ctx.vision=True;calls=[];decisions=[]
-    async def run(context,rev,action,host,domain_revision):
+    async def run(context,rev,action,host,domain_revision,control_revision):
         calls.append((action,host,domain_revision));return {'ok':True},b'PNG'
     monkeypatch.setattr(computer,'desktop_action',run)
     async def approve(call): decisions.append(call);return 'approve_once'

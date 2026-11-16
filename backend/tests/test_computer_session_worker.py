@@ -110,10 +110,12 @@ async def test_backend_session_reuses_worker_and_waits_for_handback(tmp_path,mon
         waiting=asyncio.create_task(computer.desktop_action(ctx,1,{'type':'click','x':1,'y':2}))
         await asyncio.sleep(.02);assert not waiting.done() and [x['type'] for x in messages]==['action','takeover']
         await computer.set_takeover(ctx.run_id,False)
-        assert (await waiting)[0]=={'type':'click'}
+        with pytest.raises(computer.ToolError,match='Owner control changed'): await waiting
+        assert (await computer.desktop_action(ctx,1,{'type':'screenshot'},control_revision=2))[0]=={'type':'screenshot'}
+        assert (await computer.desktop_action(ctx,1,{'type':'click','x':1,'y':2},control_revision=2))[0]=={'type':'click'}
         await computer.end_session(ctx.run_id,True)
         assert computer.active_info() is None
-    assert [x['type'] for x in messages]==['action','takeover','takeover','action','close']
+    assert [x['type'] for x in messages]==['action','takeover','takeover','action','action','close']
 
 
 def test_vision_action_is_individually_approved_and_screenshot_goes_to_model(monkeypatch):
@@ -127,7 +129,7 @@ def test_vision_action_is_individually_approved_and_screenshot_goes_to_model(mon
     from test_live_tools import tool_reply,final_reply,until_calls,get_events
     monkeypatch.setenv('FUNK_COMPUTER_ENABLED','1');monkeypatch.setenv('FUNK_COMPUTER_DESKTOP_ENABLED','1')
     image=io.BytesIO();Image.new('RGB',(10,10),'blue').save(image,format='PNG');calls=[];captured=[]
-    async def action(ctx,revision,body,host,domain_revision): calls.append((revision,body));return {'ok':True},image.getvalue()
+    async def action(ctx,revision,body,host,domain_revision,control_revision): calls.append((revision,body));return {'ok':True},image.getvalue()
     monkeypatch.setattr(computer,'desktop_action',action)
     class Client(FakeClient):
         def stream(self,*args,**kwargs): captured.append(copy.deepcopy(kwargs['json']));return super().stream(*args,**kwargs)
@@ -220,3 +222,51 @@ def test_run_reports_computer_snapshot_failure_without_losing_usage(monkeypatch)
             rows=c.execute('SELECT status FROM budget_reservations WHERE parent_run_id=?',(run,)).fetchall()
             assert len(rows)==2 and all(r['status']=='settled' for r in rows)
     assert calls==[True,True]
+
+
+@pytest.mark.asyncio
+async def test_takeover_invalidates_stale_actions_and_approval(tmp_path,monkeypatch):
+    from funkbot import computer
+    from funkbot.tool_runtime import execute
+    from test_computer import make_context
+    monkeypatch.setenv('FUNK_COMPUTER_ENABLED','1');monkeypatch.setenv('FUNK_COMPUTER_DESKTOP_ENABLED','1')
+    ctx,_=make_context(tmp_path);ctx.vision=True
+    state={'revision':0,'takeover':False};executed=[];approvals=[]
+    monkeypatch.setattr(computer,'desktop_control_state',lambda _:dict(state))
+    async def action(context,revision,body,host,domain_revision,control_revision):
+        executed.append((body['type'],control_revision));return {},b'frame'
+    monkeypatch.setattr(computer,'desktop_action',action)
+    async def approve(call): approvals.append(call);return 'approve_once'
+    result=await execute(ctx,'computer_action',{'type':'screenshot'},approve)
+    assert result['status']=='completed' and ctx.desktop_observation_revision==0
+    # A takeover and hand-back invalidate the frame already seen by the model.
+    state['revision']=2
+    result=await execute(ctx,'computer_action',{'type':'click','x':1,'y':2},approve)
+    assert result['status']=='denied' and 'screenshot' in result['message'] and len(approvals)==1
+    result=await execute(ctx,'computer_action',{'type':'screenshot'},approve)
+    assert result['status']=='completed' and ctx.desktop_observation_revision==2
+    async def takeover_during_approval(call):
+        state['revision']=4
+        return 'approve_once'
+    result=await execute(ctx,'computer_action',{'type':'click','x':1,'y':2},takeover_during_approval)
+    assert result['status']=='denied' and executed==[('screenshot',0),('screenshot',2)]
+
+
+@pytest.mark.asyncio
+async def test_observation_keeps_capture_revision_when_owner_takes_over_after_action(tmp_path,monkeypatch):
+    from funkbot import computer
+    from funkbot.tool_runtime import execute
+    from test_computer import make_context
+    monkeypatch.setenv('FUNK_COMPUTER_ENABLED','1');monkeypatch.setenv('FUNK_COMPUTER_DESKTOP_ENABLED','1')
+    ctx,_=make_context(tmp_path);ctx.vision=True
+    state={'revision':0,'takeover':False}
+    monkeypatch.setattr(computer,'desktop_control_state',lambda _:dict(state))
+    async def action(*args):
+        state['revision']=2
+        return {},b'frame'
+    monkeypatch.setattr(computer,'desktop_action',action)
+    async def approve(_): return 'approve_once'
+    assert (await execute(ctx,'computer_action',{'type':'screenshot'},approve))['status']=='completed'
+    assert ctx.desktop_observation_revision==0
+    result=await execute(ctx,'computer_action',{'type':'click','x':1,'y':2},approve)
+    assert result['status']=='denied' and 'screenshot' in result['message']

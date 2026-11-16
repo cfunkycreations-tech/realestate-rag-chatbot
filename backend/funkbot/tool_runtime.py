@@ -35,6 +35,7 @@ class ToolContext:
     search_info: Callable = lambda c: None
     approved_destinations: list | None = None
     vision: bool = False
+    desktop_observation_revision: int | None = None
 
 
 def live(c, context):
@@ -56,6 +57,7 @@ async def execute(context: ToolContext, name: str, args: dict, wait_decision):
         if not spec: raise tools.ToolError('Unknown tool.')
         policy=context.policy_for(c,name,spec.risk)
         connector=None
+        desktop_stale=False
         if name in ('computer_shell','computer_action'):
             parsed=(tools.ComputerArgs if name=='computer_shell' else tools.ComputerActionArgs).model_validate(args)
             grant=computer.permission(c,context.bot_id)
@@ -68,7 +70,11 @@ async def execute(context: ToolContext, name: str, args: dict, wait_decision):
                     try: host=browser_network.target(parsed.url)
                     except tools.ToolError: policy='deny'
                     if not browser_network.enabled() or host not in domain_policy['domains']: policy='deny'
-                args.update({'approved_host':host,'domain_revision':domain_policy['revision']})
+                state=computer.desktop_control_state(context.run_id)
+                control_revision=state['revision'] if state else 0
+                desktop_stale=bool(state and context.desktop_observation_revision is not None and context.desktop_observation_revision!=control_revision and parsed.type!='screenshot')
+                if desktop_stale: policy='deny'
+                args.update({'approved_host':host,'domain_revision':domain_policy['revision'],'control_revision':control_revision})
         if name=='mcp_call':
             parsed=tools.McpCallArgs.model_validate(args)
             try: arguments=json.loads(parsed.arguments_json)
@@ -112,7 +118,7 @@ async def execute(context: ToolContext, name: str, args: dict, wait_decision):
         context.notify({'type':'tool.proposed','call_id':call,'tool':name,'risk':row['risk'],'arguments':json.loads(row['arguments']),'status':row['status']})
         if row['status']=='denied':
             context.notify({'type':'tool.decision','call_id':call,'decision':'policy_denied','status':'denied'})
-            return {'status':'denied','message':'The owner tool policy denied this call.'}
+            return {'status':'denied','message':'Owner control changed since the last screenshot. Request a new screenshot after hand back before another action.' if desktop_stale else 'The owner tool policy denied this call.'}
         if row['status']=='pending':
             granted=name not in ('mcp_call','create_handoff','attach_mission_result','read_work_file','web_search','computer_shell','computer_action') and name in context.run_grants
             decision='run_grant' if granted else await wait_decision(call)
@@ -133,6 +139,9 @@ async def execute(context: ToolContext, name: str, args: dict, wait_decision):
             if name in ('computer_shell','computer_action'):
                 grant=computer.permission(c,context.bot_id);reviewed=json.loads(row['arguments'])
                 if not computer.enabled() or not grant['allowed'] or grant['revision']!=reviewed['permission_revision'] or context.policy_for(c,'computer_shell','write')=='deny' or (name=='computer_action' and (not computer.desktop_enabled() or not context.vision)): current='deny'
+                if name=='computer_action':
+                    state=computer.desktop_control_state(context.run_id)
+                    if state and state['revision']!=reviewed['control_revision']: current='deny'
                 if name=='computer_action' and reviewed['approved_host']:
                     domains=browser_network.policy(c)
                     if not browser_network.enabled() or domains['revision']!=reviewed['domain_revision'] or reviewed['approved_host'] not in domains['domains']: current='deny'
@@ -162,14 +171,17 @@ async def execute(context: ToolContext, name: str, args: dict, wait_decision):
                 if name=='read_work_file': context.approved_destinations=destinations
         if blocked:
             context.notify({'type':'tool.decision','call_id':call,'decision':'policy_denied','status':'denied'})
-            return {'status':'denied','message':'Tool policy changed before execution.'}
+            return {'status':'denied','message':'Tool policy or desktop owner control changed before execution; request a fresh screenshot and approval.' if name=='computer_action' else 'Tool policy changed before execution.'}
         safe_args=json.loads(row['arguments'])
         screenshot=None
         try:
             if name=='computer_action':
                 body=tools.ReviewedComputerActionArgs.model_validate(safe_args)
-                action=body.model_dump(exclude_none=True,exclude={'permission_revision','approved_host','domain_revision'})
-                result,screenshot=await computer.desktop_action(context,body.permission_revision,action,body.approved_host,body.domain_revision)
+                action=body.model_dump(exclude_none=True,exclude={'permission_revision','approved_host','domain_revision','control_revision'})
+                result,screenshot=await computer.desktop_action(context,body.permission_revision,action,body.approved_host,body.domain_revision,body.control_revision)
+                # The screenshot was captured under the operation lock at this
+                # revision. Owner takeover may occur immediately afterward.
+                context.desktop_observation_revision=body.control_revision
             elif name=='computer_shell':
                 body=tools.ReviewedComputerArgs.model_validate(safe_args)
                 result=await computer.execute(context,body.command,body.permission_revision)

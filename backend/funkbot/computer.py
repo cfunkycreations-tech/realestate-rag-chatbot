@@ -185,7 +185,7 @@ def _decode_frame(value):
 class DesktopSession:
     def __init__(self,context,revision,reader,writer):
         self.context=context;self.revision=revision;self.reader=reader;self.writer=writer
-        self.domains={};self.network_bytes=0
+        self.domains={};self.network_bytes=0;self.control_revision=0
         self.pending={};self.operation=asyncio.Lock();self.available=asyncio.Event();self.available.set()
         self.closed=asyncio.Event();self.task=None
 
@@ -247,12 +247,13 @@ class DesktopSession:
             raise ToolError('Desktop request interrupted; the action may have run.') from None
         finally: self.pending.pop(identifier,None)
 
-    async def action(self,action,approved_host="",domain_revision=0):
+    async def action(self,action,approved_host="",domain_revision=0,control_revision=0):
         while True:
             await self.available.wait()
             async with self.operation:
                 if self.closed.is_set(): raise ToolError('Desktop session ended.')
                 if not self.available.is_set(): continue
+                if self.control_revision!=control_revision: raise ToolError('Owner control changed after approval. Request a new screenshot and approval before another action.')
                 check_live(self.context,self.revision)
                 if approved_host:
                     from . import browser_network
@@ -271,9 +272,12 @@ class DesktopSession:
             check_live(self.context,self.revision)
             response=await self.request({'type':'takeover','enabled':enabled})
             if not response.get('ok') or response.get('takeover') is not enabled: raise ToolError('Could not change desktop control.')
+            changed=enabled != (not self.available.is_set())
+            if changed: self.control_revision+=1
             if enabled: self.available.clear()
             else: self.available.set()
-            if _active and _active['run_id']==self.context.run_id: _active['takeover']=enabled
+            if _active and _active['run_id']==self.context.run_id:
+                _active['takeover']=enabled;_active['control_revision']=self.control_revision
 
 
 async def get_session(context,revision):
@@ -287,7 +291,7 @@ async def get_session(context,revision):
         if _lock.locked(): raise ToolError('Computer sandbox is busy.')
         await _lock.acquire();writer=None
         try:
-            _active={'run_id':context.run_id,'bot_id':context.bot_id,'mode':'session','takeover':False}
+            _active={'run_id':context.run_id,'bot_id':context.bot_id,'mode':'session','takeover':False,'control_revision':0}
             _frame=None
             workspace=load_workspace(context)
             reader,writer=await ready_connection();check_live(context,revision)
@@ -305,9 +309,15 @@ async def get_session(context,revision):
             raise
 
 
-async def desktop_action(context,revision,action,approved_host="",domain_revision=0):
+def desktop_control_state(run_id):
+    if _session and _session.context.run_id==run_id:
+        return {'revision':_session.control_revision,'takeover':not _session.available.is_set()}
+    return None
+
+
+async def desktop_action(context,revision,action,approved_host="",domain_revision=0,control_revision=0):
     session=await get_session(context,revision)
-    return await session.action(action,approved_host,domain_revision)
+    return await session.action(action,approved_host,domain_revision,control_revision)
 
 
 async def set_takeover(run_id,enabled):

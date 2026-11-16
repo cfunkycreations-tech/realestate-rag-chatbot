@@ -52,7 +52,7 @@ class ComputerActionArgs(BaseModel):
     @model_validator(mode='after')
     def matching_fields(self):
         required={'open_url':{'url'},'click':{'x','y'},'type':{'text'},'key':{'key'},'scroll':{'delta_x','delta_y'},'click_selector':{'selector'},'fill':{'selector','text'},'extract_text':set(),'screenshot':set()}[self.type]
-        actual={k for k,v in self.model_dump(exclude_none=True).items() if k not in ('type','permission_revision','domain_revision','approved_host')}
+        actual={k for k,v in self.model_dump(exclude_none=True).items() if k not in ('type','permission_revision','domain_revision','approved_host','control_revision')}
         if actual!=required or (self.type in ('type','open_url') and not getattr(self,'text' if self.type=='type' else 'url')): raise ValueError('Fields do not match action type.')
         return self
 
@@ -60,6 +60,7 @@ class ComputerActionArgs(BaseModel):
 class ReviewedComputerActionArgs(ComputerActionArgs):
     permission_revision: int = Field(ge=0)
     domain_revision: int = Field(ge=0)
+    control_revision: int = Field(ge=0)
     approved_host: str = Field(default='',max_length=253)
 
 
