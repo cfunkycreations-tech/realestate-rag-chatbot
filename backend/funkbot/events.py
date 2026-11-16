@@ -59,6 +59,14 @@ class GroupExchange(BaseModel):
     summary: str = Field(max_length=240)
 
 
+class DelegationPair(BaseModel):
+    to_bot_id: str
+
+
+class HandoffEvent(GroupExchange):
+    approval: Literal['pair','individual','owner'] = 'owner'
+
+
 class BotDMMessage(BaseModel):
     dm_id: str
     turn_id: str
@@ -73,7 +81,9 @@ PAYLOAD_TYPES = {
     'computer.takeover': ComputerTakeover,
     'computer.domains_changed': ComputerDomainsChanged,
     'bot_dm.message': BotDMMessage,
-    'handoff.created': GroupExchange,
+    'handoff.created': HandoffEvent,
+    'delegation.pair_approved': DelegationPair,
+    'delegation.pair_revoked': DelegationPair,
     'group.session_started': GroupSession,
     'group.session_ended': GroupSession,
     'group.delegated': GroupExchange,
@@ -90,7 +100,7 @@ class EventOut(BaseModel):
     id: int
     bot_id: str | None
     run_id: str | None
-    type: Literal['computer.domains_changed', 'computer.takeover', 'computer.owner_input', 'computer.permission_changed', 'bot_dm.message', 'handoff.created', 'run.started', 'run.finished', 'bot.state_changed', 'message.sent', 'error.raised', 'group.session_started', 'group.session_ended', 'group.delegated', 'group.replied']
+    type: Literal['delegation.pair_approved', 'delegation.pair_revoked', 'computer.domains_changed', 'computer.takeover', 'computer.owner_input', 'computer.permission_changed', 'bot_dm.message', 'handoff.created', 'run.started', 'run.finished', 'bot.state_changed', 'message.sent', 'error.raised', 'group.session_started', 'group.session_ended', 'group.delegated', 'group.replied']
     payload: dict
     created_at: float
 

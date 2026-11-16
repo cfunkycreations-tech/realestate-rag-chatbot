@@ -116,6 +116,7 @@ async def execute(context: ToolContext, name: str, args: dict, wait_decision):
             expected=context.handoff_catalog.get(parsed.to_bot_id)
             args={'receiver_name':expected or '',**{k:v for k,v in parsed.model_dump().items() if k!='receiver_name'}}
             if not receiver or not expected or context.redact(receiver['name'])!=expected or parsed.to_bot_id==context.bot_id: policy='deny'
+            elif policy!='deny' and c.execute('SELECT 1 FROM delegation_pairs WHERE from_bot_id=? AND to_bot_id=?',(context.bot_id,parsed.to_bot_id)).fetchone(): policy='auto'
         call=tool_audit.propose(c,context.run_id,context.bot_id,name,args,context.redact,policy=policy)
         row=dict(c.execute('SELECT * FROM tool_calls WHERE id=?',(call,)).fetchone())
     try:
@@ -170,6 +171,7 @@ async def execute(context: ToolContext, name: str, args: dict, wait_decision):
             if name=='create_handoff':
                 reviewed=json.loads(row['arguments']);receiver=c.execute('SELECT name FROM bots WHERE id=?',(reviewed['to_bot_id'],)).fetchone()
                 if not receiver or context.redact(receiver['name'])!=reviewed['receiver_name'] or context.handoff_catalog.get(reviewed['to_bot_id'])!=reviewed['receiver_name']: current='deny'
+                elif policy=='auto' and current!='deny' and c.execute('SELECT 1 FROM delegation_pairs WHERE from_bot_id=? AND to_bot_id=?',(context.bot_id,reviewed['to_bot_id'])).fetchone(): current='auto'
             if current=='deny' or (policy=='auto' and current!='auto'):
                 tool_audit.deny_policy_change(c,call);blocked=True
             else:
@@ -214,7 +216,7 @@ async def execute(context: ToolContext, name: str, args: dict, wait_decision):
                 result=await context.artifact_call(context,tools.MissionArtifactArgs.model_validate(safe_args))
             elif name=='create_handoff':
                 if not context.handoff_call: raise tools.ToolError('Handoffs are unavailable.')
-                result=await context.handoff_call(context,tools.HandoffArgs.model_validate(safe_args))
+                result=await context.handoff_call(context,tools.HandoffArgs.model_validate(safe_args),auto_approved=policy=='auto')
             elif name=='web_search':
                 result=await tools.web_search(tools.WebSearchArgs.model_validate(safe_args),context.allow,context.deny)
             elif name=='web_fetch': result=await tools.web_fetch(tools.WebFetchArgs.model_validate(safe_args),context.allow,context.deny)

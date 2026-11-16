@@ -102,7 +102,7 @@ def test_bot_dm_migration_preserves_workflows(tmp_path):
         c.exec_driver_sql("INSERT INTO workflows VALUES ('w',NULL,1,1,1)")
         c.exec_driver_sql("INSERT INTO workflow_versions VALUES ('w',1,'Kept','b','[\"work\"]','',1)");c.commit()
         command.upgrade(cfg,'head');c.commit()
-        assert c.exec_driver_sql('SELECT version_num FROM alembic_version').scalar()=='0029_learned_routine_drafts'
+        assert c.exec_driver_sql('SELECT version_num FROM alembic_version').scalar()=='0030_delegation_pairs'
         assert c.exec_driver_sql("SELECT steps FROM workflow_versions WHERE workflow_id='w'").scalar()=='["work"]'
         assert c.exec_driver_sql('SELECT count(*) FROM bot_dms').scalar()==0
 

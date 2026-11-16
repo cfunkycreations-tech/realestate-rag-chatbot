@@ -104,3 +104,30 @@ def test_handoff_receiver_budget_refusal_and_stopped_proposal(monkeypatch):
         c.post(f'/api/jobs/{run}/stop');get_events(c,run)
         assert c.post(f'/api/jobs/{run}/tool-calls/{card["id"]}/decision',json={'decision':'approve_once'}).status_code==409
         assert len(c.get('/api/missions').json())==1
+
+
+def test_owner_preapproved_directional_pair_auto_delegates_with_budget_and_audit(monkeypatch):
+    from test_live_tools import tool_reply,get_events
+    receiver=''
+    class Dynamic(FakeClient):
+        def stream(self,*args,**kwargs):
+            last=kwargs['json']['messages'][-1]
+            if last['role']=='user' and not str(last['content']).startswith('Mission: Handoff'):
+                return tool_reply('create_handoff',{'to_bot_id':receiver,'reason':'Please review','context':'Review the draft'})
+            return final_reply()
+    monkeypatch.setattr(service.httpx,'AsyncClient',Dynamic)
+    with TestClient(service.app) as c:
+        setup(c);configure_budget(c)
+        sender=c.post('/api/bots',json={'name':'Sender'}).json()['id'];receiver=c.post('/api/bots',json={'name':'Receiver'}).json()['id']
+        pair={'from_bot_id':sender,'to_bot_id':receiver}
+        assert c.put('/api/settings/delegation-pairs',json=pair).status_code==200
+        assert c.get('/api/settings/delegation-pairs').json()[0]['to_bot_id']==receiver
+        run=c.post(f'/api/bots/{sender}/chat',json={'content':'Delegate'}).json()['job_id']
+        assert get_events(c,run)[-1]['type']=='done'
+        call=c.get(f'/api/jobs/{run}/tool-calls').json()[0];assert call['status']=='completed'
+        mission=wait_mission(c,call['result']['mission_id'],{'done','failed'});assert mission['status']=='done'
+        with service.db() as db:
+            assert db.execute("SELECT 1 FROM tool_audit WHERE call_id=? AND action='pair_auto_approved'",(call['id'],)).fetchone()
+            assert db.execute('SELECT 1 FROM budget_reservations WHERE bot_id=?',(receiver,)).fetchone()
+        assert c.request('DELETE','/api/settings/delegation-pairs',json=pair).status_code==200
+        assert c.get('/api/settings/delegation-pairs').json()==[]
