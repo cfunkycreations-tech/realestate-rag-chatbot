@@ -7,7 +7,7 @@ from datetime import datetime
 from dataclasses import dataclass, field
 from typing import Callable
 
-from . import tool_audit, tools, computer, browser_network
+from . import tool_audit, tools, computer, browser_network, inbox
 
 
 @dataclass
@@ -61,6 +61,7 @@ async def execute(context: ToolContext, name: str, args: dict, wait_decision):
         connector=None
         desktop_stale=False
         if name=='remember_fact': policy='auto' if context.memory_source else 'deny'
+        if name=='notify_owner': policy='auto'
         if name in ('computer_shell','computer_action'):
             parsed=(tools.ComputerArgs if name=='computer_shell' else tools.ComputerActionArgs).model_validate(args)
             grant=computer.permission(c,context.bot_id)
@@ -140,6 +141,7 @@ async def execute(context: ToolContext, name: str, args: dict, wait_decision):
             c.execute('BEGIN IMMEDIATE');live(c,context)
             current=context.policy_for(c,name,row['risk'])
             if name=='remember_fact': current='auto' if context.memory_source else 'deny'
+            if name=='notify_owner': current='auto'
             if name in ('computer_shell','computer_action'):
                 grant=computer.permission(c,context.bot_id);reviewed=json.loads(row['arguments'])
                 if not computer.enabled() or not grant['allowed'] or grant['revision']!=reviewed['permission_revision'] or context.policy_for(c,'computer_shell','write')=='deny' or (name=='computer_action' and (not computer.desktop_enabled() or not context.vision)): current='deny'
@@ -179,7 +181,14 @@ async def execute(context: ToolContext, name: str, args: dict, wait_decision):
         safe_args=json.loads(row['arguments'])
         screenshot=None
         try:
-            if name=='remember_fact':
+            if name=='notify_owner':
+                body=tools.NotifyOwnerArgs.model_validate(safe_args)
+                if not body.title.strip() or not body.message.strip(): raise tools.ToolError('Enter a title and message.')
+                with context.db() as c:
+                    c.execute('BEGIN IMMEDIATE');live(c,context)
+                    notice_id=inbox.add(c,context.bot_id,'bot',body.title.strip(),body.message.strip(),context.run_id,context.mission_id)
+                result={'id':notice_id}
+            elif name=='remember_fact':
                 fact=tools.LearnedMemoryArgs.model_validate(safe_args).fact.strip()
                 if not fact or '[redacted]' in fact.casefold(): raise tools.ToolError('Cannot remember empty or redacted facts.')
                 if len(context.learned_facts)>=5: raise tools.ToolError('Memory extraction limit reached for this response.')

@@ -49,7 +49,7 @@ from funkbot.budget import BudgetError, NANOS_PER_DOLLAR, dollars_to_nanos, limi
 from funkbot.tool_policy import WebPolicy
 from funkbot import browser_network, computer, computer_snapshot
 from funkbot.tools import ToolError, McpCallArgs
-from funkbot import mcp_http, tools
+from funkbot import mcp_http, tools, inbox
 from funkbot.tool_audit import abort as abort_tool
 from funkbot.tool_runtime import ToolContext
 from funkbot.tool_bridge import ToolBridge
@@ -1424,6 +1424,9 @@ def finish_run(job, status, kind, values=None, completion=None):
             c.execute('UPDATE mission_runs SET status=?,result=?,error=?,updated_at=? WHERE run_id=?',(status,result,reason,time.time(),job['id']))
             if not job.get('group_managed'):
                 c.execute('UPDATE missions SET status=?,result=?,error=?,updated_at=? WHERE id=?',(status,result,reason,time.time(),job['mission_id']))
+                routine=c.execute('SELECT routines.title FROM routine_runs JOIN routines ON routines.id=routine_runs.routine_id WHERE routine_runs.mission_id=?',(job['mission_id'],)).fetchone()
+                if routine:
+                    inbox.add(c,job['bot_id'],'routine','Routine '+status+': '+routine['title'],redact_text((result or reason or '')[:2000],list(job['secrets'])),job['id'],job['mission_id'])
         if job.get('lab_step_id'):
             c.execute('UPDATE lab_runs SET status=?,result=?,error=?,updated_at=? WHERE id=?',(status,completion[1] if completion else None,values.get('message') if status!='done' else None,time.time(),job['lab_step_id']))
         append_event(c, job['bot_id'], job['id'], 'run.finished', {'status':status})
@@ -1475,7 +1478,7 @@ def tool_event(job, item):
 async def run_chat(job, bot, history, profile):
     entries=job.get('entries') or json.loads(config('profiles')).get(profile,[])
     messages=[{'role':'system','content':bot_system_prompt(bot)},*history]
-    tool_definitions=declarations(bool(bot.get('connector_catalog')),bool(bot.get('handoff_catalog')),bool(job.get('mission_id')),bool(bot.get('search_enabled')),bool(bot.get('computer_enabled')),bool(bot.get('computer_desktop')),bool(bot.get('learn_memory'))) if 'id' in job and not job.get('lab_step_id') else []
+    tool_definitions=declarations(bool(bot.get('connector_catalog')),bool(bot.get('handoff_catalog')),bool(job.get('mission_id')),bool(bot.get('search_enabled')),bool(bot.get('computer_enabled')),bool(bot.get('computer_desktop')),bool(bot.get('learn_memory')),True) if 'id' in job and not job.get('lab_step_id') else []
     complete_text='';previous_desktop_message=None
     try:
         max_rounds=25 if bot.get('computer_desktop') else 5
@@ -1702,7 +1705,7 @@ async def start_chat(bot_id: str, body: ChatIn, mission_id: str | None = None, g
         if price:
             # Conservative byte estimate with protocol overhead, not a guarantee
             # for unknown tokenizers or gateways that add unreported tokens.
-            bound = prompt_bound([{'role':'system','content':bot_system_prompt(bot)},*history],[] if lab_step_id else declarations(bool(bot.get('connector_catalog')),bool(bot.get('handoff_catalog')),bool(mission_id),bool(bot.get('search_enabled')),bool(bot.get('computer_enabled')),bool(bot.get('computer_desktop')),bool(bot.get('learn_memory'))))
+            bound = prompt_bound([{'role':'system','content':bot_system_prompt(bot)},*history],[] if lab_step_id else declarations(bool(bot.get('connector_catalog')),bool(bot.get('handoff_catalog')),bool(mission_id),bool(bot.get('search_enabled')),bool(bot.get('computer_enabled')),bool(bot.get('computer_desktop')),bool(bot.get('learn_memory')),True))
             if bound > price['max_prompt_tokens']:
                 raise HTTPException(400, 'Message and conversation exceed the configured prompt token safety bound for this profile.')
         try:
@@ -1724,6 +1727,8 @@ async def start_chat(bot_id: str, body: ChatIn, mission_id: str | None = None, g
             message_id = str(uuid.uuid4())
             c.execute('INSERT INTO messages VALUES (?,?,?,?,?)',(message_id,bot_id,'user',content,now))
             c.execute('INSERT INTO chat_messages VALUES (?,?)',(chat_id,message_id))
+            for mention in mentions if bot['learn_memory'] else []:
+                if mention['kind']=='bot': inbox.add(c,mention['id'],'mention','Bot mentioned',redact_text(content[:1000],keys),job_id)
             for attachment in attached: c.execute('UPDATE chat_attachments SET message_id=? WHERE id=?',(message_id,attachment['id']))
             c.execute('UPDATE chats SET updated_at=? WHERE id=?',(now,chat_id))
             append_event(c, bot_id, job_id, 'message.sent', {'message_id':message_id, 'role':'user', 'summary':content[:240]})
@@ -2490,6 +2495,29 @@ async def routine_scheduler():
         except asyncio.CancelledError: raise
         except Exception: logging.getLogger('uvicorn.error').exception('Routine scheduler tick failed')
         await asyncio.sleep(5)
+
+
+@app.get('/api/inbox/notices')
+def list_inbox_notices(request: Request):
+    require_auth(request)
+    with db() as c: rows=c.execute('SELECT * FROM inbox_notices ORDER BY created_at DESC LIMIT 200').fetchall()
+    return [redact_event_value(dict(row),configured_secrets()) for row in rows]
+
+
+@app.post('/api/inbox/notices/{notice_id}/read')
+def read_inbox_notice(notice_id: str,request: Request):
+    require_auth(request)
+    with db() as c:
+        if not c.execute('UPDATE inbox_notices SET read_at=? WHERE id=?',(time.time(),notice_id)).rowcount: raise HTTPException(404,'Notice not found.')
+    return {'ok':True}
+
+
+@app.delete('/api/inbox/notices/{notice_id}')
+def delete_inbox_notice(notice_id: str,request: Request):
+    require_auth(request)
+    with db() as c:
+        if not c.execute('DELETE FROM inbox_notices WHERE id=?',(notice_id,)).rowcount: raise HTTPException(404,'Notice not found.')
+    return {'ok':True}
 
 
 @app.get('/api/routine-suggestions')

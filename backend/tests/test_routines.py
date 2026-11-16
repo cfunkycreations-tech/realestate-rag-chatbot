@@ -131,3 +131,29 @@ def test_repeated_work_suggests_owner_approved_routine():
         approved=c.post('/api/routine-suggestions/'+suggestions[0]['id']+'/approve',json=body)
         assert approved.status_code==200 and len(c.get('/api/routines').json())==1
         assert c.get('/api/routine-suggestions').json()==[]
+
+
+def test_inbox_contains_routine_results_mentions_and_bot_notices(monkeypatch):
+    from test_live_tools import tool_reply
+    monkeypatch.setattr(service.httpx,'AsyncClient',FakeClient)
+    with TestClient(service.app) as c:
+        setup(c);configure_budget(c)
+        bot=c.post('/api/bots',json={'name':'Notifier'}).json()['id']
+        other=c.post('/api/bots',json={'name':'Mentioned'}).json()['id']
+        FakeClient.responses=[tool_reply('notify_owner',{'title':'Update','message':'Work is ready.'}),final_reply()]
+        run=c.post(f'/api/bots/{bot}/chat',json={'content':f'Please update @{{bot:{other}|Mentioned}}'}).json()['job_id']
+        assert '"type": "done"' in c.get(f'/api/jobs/{run}/events').text
+        notices=c.get('/api/inbox/notices').json()
+        assert {n['kind'] for n in notices}=={'bot','mention'}
+        notice=next(n for n in notices if n['kind']=='bot')
+        assert notice['title']=='Update' and notice['body']=='Work is ready.'
+        assert c.post('/api/inbox/notices/'+notice['id']+'/read').status_code==200
+        assert next(n for n in c.get('/api/inbox/notices').json() if n['id']==notice['id'])['read_at']
+        FakeClient.responses=[final_reply()]
+        rid=c.post('/api/routines',json={'title':'Daily','instructions':'Report','bot_id':bot,'cron':'0 9 * * *','timezone':'UTC'}).json()['id']
+        mid=c.post(f'/api/routines/{rid}/run').json()['mission_id']
+        approval=c.get('/api/routine-approvals').json()[0]
+        assert c.post(f"/api/routines/{rid}/runs/{approval['id']}/decision",json={'decision':'approve'}).status_code==200
+        assert wait_mission(c,mid,{'done'})['status']=='done'
+        assert any(n['kind']=='routine' and n['mission_id']==mid for n in c.get('/api/inbox/notices').json())
+        assert c.delete('/api/inbox/notices/'+notice['id']).status_code==200

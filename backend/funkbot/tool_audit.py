@@ -28,12 +28,12 @@ def propose(c, run_id, bot_id, name, arguments, redact, now=None, policy=None):
         raise ToolError('Redacted tool arguments are invalid.') from exc
     call_id=str(uuid.uuid4());now=time.time() if now is None else now
     policy=policy or ('auto' if spec.risk=='read' else 'ask')
-    if policy not in ('auto','ask','deny') or (policy=='auto' and spec.risk!='read' and name!='remember_fact'): raise ToolError('Invalid tool policy.')
+    if policy not in ('auto','ask','deny') or (policy=='auto' and spec.risk!='read' and name not in ('remember_fact','notify_owner')): raise ToolError('Invalid tool policy.')
     status='denied' if policy=='deny' else 'approved' if policy=='auto' else 'pending'
     c.execute('''INSERT INTO tool_calls (id,run_id,bot_id,tool_name,risk,arguments,status,created_at,updated_at)
                  VALUES (?,?,?,?,?,?,?,?,?)''', (call_id,run_id,bot_id,name,spec.risk,json.dumps(cleaned),status,now,now))
     audit(c,call_id,'proposed',now)
-    if status=='approved': audit(c,call_id,'memory_auto_approved' if name=='remember_fact' else 'read_auto_approved',now)
+    if status=='approved': audit(c,call_id,'internal_auto_approved' if name in ('remember_fact','notify_owner') else 'read_auto_approved',now)
     if status=='denied': audit(c,call_id,'policy_denied',now)
     return call_id
 
