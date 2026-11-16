@@ -1,4 +1,5 @@
 """One command per container lifetime; only data snapshots cross the boundary."""
+import base64
 import json
 import os
 import resource
@@ -116,18 +117,81 @@ def peer_disconnected(conn):
     except (OSError,ValueError): return True
 
 
-def execute(command,conn=None):
+def desktop_input(event):
+    """Only fixed xdotool arguments are accepted; never invoke a shell."""
+    if not isinstance(event,dict): return
+    kind=event.get('type')
+    if kind=='click' and set(event)=={'type','x','y','button'}:
+        x,y,button=event['x'],event['y'],event['button']
+        if type(x) is not int or type(y) is not int or type(button) is not int or not (0<=x<1024 and 0<=y<768 and button in (1,2,3)): return
+        args=['mousemove','--sync',str(x),str(y),'click',str(button)]
+    elif kind=='key' and set(event)=={'type','key'} and event['key'] in ('Return','Tab','Escape','BackSpace','Delete','Left','Right','Up','Down','Home','End','Page_Up','Page_Down','ctrl+l','ctrl+a','ctrl+c','ctrl+v'):
+        args=['key',event['key']]
+    elif kind=='text' and set(event)=={'type','text'} and isinstance(event['text'],str) and 1<=len(event['text'])<=200 and all(32<=ord(c)<=126 for c in event['text']):
+        args=['type','--clearmodifiers','--delay','0','--',event['text']]
+    else: return
+    try: subprocess.run(['xdotool',*args],env={'DISPLAY':':99','PATH':'/usr/bin:/bin','HOME':WORKSPACE},stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,preexec_fn=drop_privileges,timeout=2,check=False)
+    except (OSError,subprocess.TimeoutExpired): pass
+
+
+def desktop_frame():
+    # Capture as the same unprivileged user as the display, with no shell.
+    env={'DISPLAY':':99','PATH':'/usr/bin:/bin','HOME':WORKSPACE}
+    try:
+        xwd=subprocess.Popen(['xwd','-root','-silent'],env=env,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,preexec_fn=drop_privileges)
+        try:
+            image=subprocess.run(['convert','xwd:-','png:-'],env=env,stdin=xwd.stdout,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,preexec_fn=drop_privileges,timeout=2,check=False)
+        finally:
+            xwd.stdout.close()
+            try: xwd.wait(timeout=1)
+            except subprocess.TimeoutExpired: xwd.kill();xwd.wait()
+        if image.returncode==0 and len(image.stdout)<=1024*1024 and image.stdout.startswith(b'\x89PNG\r\n\x1a\n'):
+            return image.stdout
+    except (OSError,subprocess.TimeoutExpired): pass
+    return None
+
+
+def execute(command,conn=None,desktop=False):
+    display=None
+    if desktop:
+        display=subprocess.Popen(['Xvfb',':99','-screen','0','1024x768x24','-nolisten','tcp','-noreset'],cwd=WORKSPACE,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,env={'PATH':'/usr/bin:/bin','HOME':WORKSPACE},preexec_fn=drop_privileges,start_new_session=True)
+        # Wait for the local display before launching the command.
+        env={'DISPLAY':':99','PATH':'/usr/bin:/bin','HOME':WORKSPACE}
+        for _ in range(30):
+            if peer_disconnected(conn): raise CommandCancelled()
+            check=subprocess.run(['xdpyinfo'],env=env,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,preexec_fn=drop_privileges,timeout=2,check=False)
+            if check.returncode==0: break
+            time.sleep(.1)
+        else: raise RuntimeError('Virtual display could not start.')
+        subprocess.Popen(['openbox'],cwd=WORKSPACE,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,env=env,preexec_fn=drop_privileges,start_new_session=True)
     with tempfile.TemporaryFile(dir=TEMP) as output:
         if peer_disconnected(conn): raise CommandCancelled()
         process=subprocess.Popen(['/bin/sh','-c',command],cwd=WORKSPACE,
             stdin=subprocess.DEVNULL,stdout=output,stderr=subprocess.STDOUT,
-            env={'PATH':'/usr/local/bin:/usr/bin:/bin','HOME':'/workspace','TMPDIR':'/tmp'},
+            env={'PATH':'/usr/local/bin:/usr/bin:/bin','HOME':'/workspace','TMPDIR':'/tmp',**({'DISPLAY':':99'} if desktop else {})},
             close_fds=True,start_new_session=True,preexec_fn=drop_privileges)
-        timed_out=False;cancelled=False;deadline=time.monotonic()+30
+        timed_out=False;cancelled=False;deadline=time.monotonic()+30;next_frame=time.monotonic()+.5;incoming=b''
         while True:
             # Check the connection even if the child exited, so a cancelled
             # caller does not receive or persist a workspace result.
-            if peer_disconnected(conn): cancelled=True;break
+            if desktop and conn:
+                ready,_,_=select.select([conn],[],[],0)
+                if ready:
+                    try: chunk=conn.recv(4096)
+                    except OSError: chunk=b''
+                    if not chunk: cancelled=True;break
+                    incoming+=chunk
+                    if len(incoming)>8192: cancelled=True;break
+                    while b'\n' in incoming:
+                        line,incoming=incoming.split(b'\n',1)
+                        try: desktop_input(json.loads(line))
+                        except (ValueError,RecursionError): pass
+                if time.monotonic()>=next_frame:
+                    frame=desktop_frame();next_frame=time.monotonic()+1
+                    if frame:
+                        try: conn.sendall(json.dumps({'frame':base64.b64encode(frame).decode('ascii')},separators=(',',':')).encode()+b'\n')
+                        except OSError: cancelled=True;break
+            elif peer_disconnected(conn): cancelled=True;break
             code=process.poll()
             if code is not None: break
             if time.monotonic()>=deadline: timed_out=True;break
@@ -164,12 +228,12 @@ def main():
                     data+=chunk
                 if len(data)>MAX_REQUEST or not data.endswith(b'\n'): continue
                 request=json.loads(data)
-                if not isinstance(request,dict) or set(request)!={'command','workspace'} or not isinstance(request['command'],str) or not 1<=len(request['command'])<=8000 or '\x00' in request['command']: continue
+                if not isinstance(request,dict) or set(request) not in ({'command','workspace'},{'command','workspace','desktop'}) or type(request.get('desktop',False)) is not bool or not isinstance(request['command'],str) or not 1<=len(request['command'])<=8000 or '\x00' in request['command']: continue
                 snapshot.validate(request['workspace'])
             except (ValueError,OSError,TimeoutError,RecursionError): continue
             try:
                 restore_as_user(request['workspace'])
-                result=execute(request['command'],conn)
+                result=execute(request['command'],conn,request.get('desktop',False))
                 stop_unprivileged_processes()
                 result['workspace']=collect_as_user()
                 conn.sendall(json.dumps(result,ensure_ascii=True,separators=(',',':')).encode()+b'\n')

@@ -470,3 +470,52 @@ def test_model_cannot_set_internal_permission_revision():
     acc=CallAccumulator()
     acc.feed({'tool_calls':[{'index':0,'id':'call','function':{'name':'computer_shell','arguments':json.dumps({'command':'pwd','permission_revision':999})}}]})
     with pytest.raises(tools.ToolError,match='Invalid tool arguments'): acc.finalize()
+
+
+@pytest.mark.asyncio
+async def test_desktop_stream_and_input_are_bound_to_active_run(tmp_path,monkeypatch):
+    import base64
+    monkeypatch.setenv('FUNK_COMPUTER_ENABLED','1');monkeypatch.setenv('FUNK_COMPUTER_DESKTOP_ENABLED','1')
+    monkeypatch.setattr(computer,'SOCKET',str(tmp_path/'desktop.sock'))
+    ctx,_=make_context(tmp_path);received=[];ready=asyncio.Event()
+    png=b'\x89PNG\r\n\x1a\nfixture'
+    async def handler(reader,writer):
+        writer.write(b'{"ready":1}\n');await writer.drain()
+        req=json.loads(await reader.readline());assert req['desktop'] is True
+        writer.write(json.dumps({'frame':base64.b64encode(png).decode()}).encode()+b'\n');await writer.drain();ready.set()
+        received.append(json.loads(await reader.readline()))
+        writer.write(json.dumps({'output':'done','truncated':False,'exit_code':0,'timed_out':False,'workspace':{'dirs':[],'files':{}}}).encode()+b'\n');await writer.drain();writer.close();await writer.wait_closed()
+    server=await asyncio.start_unix_server(handler,computer.SOCKET)
+    async with server:
+        task=asyncio.create_task(computer.execute(ctx,'show desktop',1));await ready.wait()
+        for _ in range(20):
+            if computer.frame(ctx.run_id): break
+            await asyncio.sleep(.01)
+        assert computer.frame(ctx.run_id)==png and computer.frame('other') is None
+        await computer.send_input(ctx.run_id,{'type':'key','key':'Return'})
+        assert (await task)['output']=='done'
+        assert received==[{'type':'key','key':'Return'}] and computer.frame(ctx.run_id) is None
+
+
+def test_owner_desktop_endpoints_require_auth_and_do_not_log_text(monkeypatch):
+    monkeypatch.setenv('FUNK_COMPUTER_ENABLED','1');monkeypatch.setenv('FUNK_COMPUTER_DESKTOP_ENABLED','1')
+    with TestClient(service.app) as client:
+        assert client.get('/api/control/computer/frame?run_id=r').status_code==401
+        assert client.post('/api/control/computer/input',json={'run_id':'r','type':'text','text':'hello'}).status_code==401
+        setup(client)
+        bot=client.post('/api/bots',json={'name':'Desktop'}).json()['id']
+        client.put(f'/api/bots/{bot}/computer/permission',json={'allowed':True,'expected_revision':0})
+        with service.db() as db: db.execute('INSERT INTO runs VALUES (?,?,?,?,?)',('run',bot,'running',1,1))
+        monkeypatch.setattr(computer,'_active',{'bot_id':bot,'run_id':'run'})
+        monkeypatch.setattr(computer,'_frame',b'\x89PNG\r\n\x1a\nfixture')
+        sent=[]
+        async def send(run_id,event): sent.append((run_id,event))
+        monkeypatch.setattr(computer,'send_input',send)
+        assert client.get('/api/control/computer/frame?run_id=other').status_code==404
+        assert client.get('/api/control/computer/frame?run_id=run').headers['cache-control']=='no-store'
+        assert client.post('/api/control/computer/input',json={'run_id':'other','type':'text','text':'password'}).status_code==409
+        assert client.post('/api/control/computer/input',json={'run_id':'run','type':'click','x':1024,'y':1,'button':1}).status_code==422
+        assert client.post('/api/control/computer/input',json={'run_id':'run','type':'text','text':'password'}).status_code==200
+        assert sent==[('run',{'type':'text','text':'password'})]
+        events=client.get('/api/events?since=0').json()['events']
+        assert [x['payload'] for x in events if x['type']=='computer.owner_input']==[{'input_type':'text'}]

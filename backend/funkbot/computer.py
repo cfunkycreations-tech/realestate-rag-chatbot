@@ -4,6 +4,8 @@ Commands never run in the backend. Only validated, bounded data snapshots cross
 into and out of the worker; a transaction persists one snapshot per Bot.
 """
 import asyncio
+import base64
+import binascii
 import json
 import os
 import time
@@ -15,9 +17,28 @@ SOCKET='/computer-control/computer.sock'
 MAX_STORED=50 * 1024 * 1024
 _lock=asyncio.Lock()  # single backend worker only
 _active=None
+_channel=None
+_frame=None
+_last_input=0.0
 
 
 def enabled(): return os.environ.get('FUNK_COMPUTER_ENABLED')=='1'
+
+def desktop_enabled(): return enabled() and os.environ.get('FUNK_COMPUTER_DESKTOP_ENABLED')=='1'
+
+def frame(run_id):
+    return _frame if _active and _active['run_id']==run_id and desktop_enabled() else None
+
+async def send_input(run_id,event):
+    global _last_input
+    if not desktop_enabled() or not _active or _active['run_id']!=run_id or _channel is None or _frame is None: raise ToolError('No matching live desktop frame.')
+    now=time.monotonic()
+    if now-_last_input<.1: raise ToolError('Desktop input is too frequent.')
+    _last_input=now
+    try:
+        _channel.write(json.dumps(event,separators=(',',':')).encode()+b'\n')
+        await _channel.drain()
+    except (OSError,ConnectionError): raise ToolError('Desktop connection closed.') from None
 
 
 def active_info():
@@ -90,25 +111,39 @@ async def ready_connection():
 
 
 async def execute(context,command,expected_revision):
-    global _active
+    global _active,_channel,_frame,_last_input
     if not enabled(): raise ToolError('Computer sandbox is disabled.')
     # Never queue accepted actions behind another Bot's command: policy and run
     # state remain easy to reason about and snapshots cannot overwrite each other.
     if _lock.locked(): raise ToolError('Computer sandbox is busy; no command was sent.')
     async with _lock:
         _active={'run_id':context.run_id,'bot_id':context.bot_id}
+        _frame=None;_last_input=0.0
         writer=None;sent=False
         try:
             workspace=load_workspace(context)
             async with asyncio.timeout(50):
                 reader,writer=await ready_connection()
                 check_live(context,expected_revision)
-                request=json.dumps({'command':command,'workspace':workspace},ensure_ascii=True,separators=(',',':')).encode()+b'\n'
+                desktop=desktop_enabled()
+                payload={'command':command,'workspace':workspace}
+                if desktop: payload['desktop']=True
+                request=json.dumps(payload,ensure_ascii=True,separators=(',',':')).encode()+b'\n'
                 sent=True
                 writer.write(request);await writer.drain()
-                data=await reader.readline()
-                if not data or len(data)>snapshots.MAX_JSON+100000: raise ValueError('Invalid response')
-                result=json.loads(data)
+                if desktop: _channel=writer
+                while True:
+                    data=await reader.readline()
+                    if not data or len(data)>snapshots.MAX_JSON+100000: raise ValueError('Invalid response')
+                    result=json.loads(data)
+                    if desktop and isinstance(result,dict) and set(result)=={'frame'}:
+                        try:
+                            image=base64.b64decode(result['frame'],validate=True)
+                            if len(image)>1024*1024 or not image.startswith(b'\x89PNG\r\n\x1a\n'): raise ValueError('Invalid frame')
+                        except (ValueError,TypeError,binascii.Error): raise ValueError('Invalid frame') from None
+                        _frame=image
+                        continue
+                    break
                 if not isinstance(result,dict) or 'error' in result: raise ValueError('Worker failed')
                 if set(result)!={'output','truncated','exit_code','timed_out','workspace'} or not isinstance(result['output'],str) or len(result['output'])>16384 or type(result['truncated']) is not bool or type(result['timed_out']) is not bool or type(result['exit_code']) is not int: raise ValueError('Invalid response')
                 save_workspace(context,result.pop('workspace'))
@@ -121,7 +156,7 @@ async def execute(context,command,expected_revision):
             raise ToolError(message) from exc
         finally:
             if writer: writer.close()
-            _active=None
+            _active=None;_channel=None;_frame=None
             if writer:
                 try: await writer.wait_closed()
                 except OSError: pass
