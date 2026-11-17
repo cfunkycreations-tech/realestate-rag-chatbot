@@ -41,7 +41,7 @@ from funkbot.memory_capture import save_learned, capture as capture_memory, norm
 from funkbot.skills import parse_invocation, parse_markdown
 from funkbot.schedule import next_occurrence
 from funkbot.backup import create as create_backup, restore as stage_restore, validate_stage, BackupError, MAX_TOTAL as MAX_BACKUP_TOTAL
-from funkbot import workspace_pointer, careers, economy, mission_control, botcomms, progression, mentorship, council
+from funkbot import workspace_pointer, careers, economy, mission_control, botcomms, progression, mentorship, council, automation
 from funkbot.tools import ALWAYS_REVIEWED
 from alembic.config import Config as AlembicConfig
 from alembic.script import ScriptDirectory
@@ -1727,7 +1727,7 @@ def tool_event(job, item):
 async def run_chat(job, bot, history, profile):
     entries=job.get('entries') or json.loads(config('profiles')).get(profile,[])
     messages=[{'role':'system','content':bot_system_prompt(bot)},*history]
-    tool_definitions=declarations(bool(bot.get('connector_catalog')),bool(bot.get('handoff_catalog')),bool(job.get('mission_id')),bool(bot.get('search_enabled')),bool(bot.get('computer_enabled')),bool(bot.get('computer_desktop')),bool(bot.get('learn_memory')),True,bool(bot.get('message_catalog'))) if 'id' in job and not job.get('lab_step_id') and not job.get('internal_draft') else []
+    tool_definitions=declarations(bool(bot.get('connector_catalog')),bool(bot.get('handoff_catalog')),bool(job.get('mission_id')),bool(bot.get('search_enabled')),bool(bot.get('computer_enabled')),bool(bot.get('computer_desktop')),bool(bot.get('learn_memory')),True,bool(bot.get('message_catalog')),family_tools=bot.get('family_tools',())) if 'id' in job and not job.get('lab_step_id') and not job.get('internal_draft') else []
     complete_text='';previous_desktop_message=None
     try:
         max_rounds=25 if bot.get('computer_desktop') or job.get('mission_id') else 5
@@ -1929,6 +1929,7 @@ async def start_chat(bot_id: str, body: ChatIn, mission_id: str | None = None, g
         bot['handoff_catalog']=[] if (lab_step_id or internal_draft) else [{'id':r['id'],'name':redact_text(r['name'],keys),'title':redact_text(r['title'],keys)} for r in c.execute('SELECT id,name,title FROM bots WHERE id<>? ORDER BY created_at,id LIMIT 20',(bot_id,))]
         reply_run=bool(lab_step_id or internal_draft or group_turn_id or dm_turn_id)
         bot['message_catalog']=[] if (reply_run or not botcomms.settings(c)['enabled']) else bot['handoff_catalog']
+        bot['family_tools']=() if reply_run else tuple(n for n,f in (('propose_to_council','bots_may_propose'),('give_peer_feedback','bots_may_give_feedback'),('suggest_training','bots_may_request')) if automation.settings(c)[f])
         now=time.time()
         profile_table=json.loads(c.execute('SELECT value FROM config WHERE key=?', ('profiles',)).fetchone()['value'])
         entries=economy.order_entries(c,profile_table.get(chosen_profile,[]),economy_on)
@@ -1961,7 +1962,7 @@ async def start_chat(bot_id: str, body: ChatIn, mission_id: str | None = None, g
         history=[*([] if (lab_step_id or internal_draft) else previous),{'role':'user','content':model_input}]
         # Conservative byte estimate with protocol overhead, not a guarantee
         # for unknown tokenizers or gateways that add unreported tokens.
-        bound = prompt_bound([{'role':'system','content':bot_system_prompt(bot)},*history],[] if (lab_step_id or internal_draft) else declarations(bool(bot.get('connector_catalog')),bool(bot.get('handoff_catalog')),bool(mission_id),bool(bot.get('search_enabled')),bool(bot.get('computer_enabled')),bool(bot.get('computer_desktop')),bool(bot.get('learn_memory')),True,bool(bot.get('message_catalog'))))
+        bound = prompt_bound([{'role':'system','content':bot_system_prompt(bot)},*history],[] if (lab_step_id or internal_draft) else declarations(bool(bot.get('connector_catalog')),bool(bot.get('handoff_catalog')),bool(mission_id),bool(bot.get('search_enabled')),bool(bot.get('computer_enabled')),bool(bot.get('computer_desktop')),bool(bot.get('learn_memory')),True,bool(bot.get('message_catalog')),family_tools=bot.get('family_tools',())))
         # Budget fallback: only ever to a strictly cheaper, priced profile, and recorded.
         candidates=[chosen_profile]+(economy.cheaper_profiles(c,chosen_profile) if not lab_step_id and economy.settings(c)['fallback']['enabled'] else [])
         first_error=None;price=None;origin_id=delegation['origin_bot_id'] if delegation else None
@@ -2005,7 +2006,7 @@ async def start_chat(bot_id: str, body: ChatIn, mission_id: str | None = None, g
             append_event(c, bot_id, job_id, 'message.sent', {'message_id':message_id, 'role':'user', 'summary':content[:240]})
     job={'id':job_id,'bot_id':bot_id,'done':False,'created':time.time(),'notify':asyncio.Event(),'entries':entries,'max_completion_tokens':price['max_completion_tokens'],'max_prompt_tokens':price['max_prompt_tokens'],'secrets':set(keys),'mission_id':mission_id,'group_managed':group_managed,'lab_step_id':lab_step_id,'internal_draft':internal_draft,'user_message_id':message_id if not lab_step_id and not internal_draft and not group_turn_id and not dm_turn_id else None,'chat_id':chat_id,'group_turn_id':group_turn_id,'group_chat_id':group_chat_id,'group_role':group_role,'dm_turn_id':dm_turn_id,'dm_id':dm_id,'dm_role':dm_role}; jobs[job_id]=job
     policy=WebPolicy.model_validate_json(config('web_policy','{}'))
-    context=ToolContext(db,DATA,job_id,bot_id,lambda text:redact_text(text,list(job['secrets'])),policy.allow,policy.deny,lambda _:None,policy_for=tool_policy_for,connector_info=connector_info,connector_call=execute_connector,handoff_catalog={item['id']:item['name'] for item in bot['handoff_catalog']},handoff_call=execute_handoff,message_catalog={item['id']:item['name'] for item in bot.get('message_catalog',[])},message_call=execute_bot_message,message_link=botcomms.authorized,colleague_finder=find_colleagues,reply_run=bool(job.get('dm_turn_id') or job.get('group_turn_id') or job.get('lab_step_id') or job.get('internal_draft')),mission_id=mission_id,artifact_call=execute_mission_artifact,artifact_review=review_mission_artifact,gateway_entries=entries,destination_snapshot=mission_gateway_destinations,search_info=search_provider_info)
+    context=ToolContext(db,DATA,job_id,bot_id,lambda text:redact_text(text,list(job['secrets'])),policy.allow,policy.deny,lambda _:None,policy_for=tool_policy_for,connector_info=connector_info,connector_call=execute_connector,handoff_catalog={item['id']:item['name'] for item in bot['handoff_catalog']},handoff_call=execute_handoff,message_catalog={item['id']:item['name'] for item in bot.get('message_catalog',[])},message_call=execute_bot_message,message_link=botcomms.authorized,colleague_finder=find_colleagues,family_call=family_tool_call,family_tools=set(bot.get('family_tools',())),reply_run=bool(job.get('dm_turn_id') or job.get('group_turn_id') or job.get('lab_step_id') or job.get('internal_draft')),mission_id=mission_id,artifact_call=execute_mission_artifact,artifact_review=review_mission_artifact,gateway_entries=entries,destination_snapshot=mission_gateway_destinations,search_info=search_provider_info)
     context.approved_destinations=approved_destinations
     context.vision=chosen_profile=='vision'
     context.memory_source=job['user_message_id'] if bot['learn_memory'] else None
@@ -2826,11 +2827,103 @@ async def draft_learned_routine(identifier):
         with db() as c: c.execute("UPDATE routine_learning SET status='failed' WHERE id=?",(identifier,))
 
 
+# ---- Phase 5b: optional Family automation (every switch is off by default; see funkbot/automation.py) ----
+def family_from_message(c,sender_id,receiver_id,kind,text):
+    '''A Phase 4 message of kind nominate_colleague / request_mentorship becomes a record that WAITS FOR THE OWNER. It never changes a level or starts anything.'''
+    try:
+        automation.check_bot_allowed(c,sender_id,'bots_may_request')
+        if kind=='request_mentorship': automation.request_mentorship(c,sender_id,receiver_id,text)
+        else:
+            nxt=progression.next_level(progression.current(c,receiver_id)['level'])
+            if nxt: progression.recommend(c,receiver_id,nxt,'bot','Nominated by a colleague who worked with them: '+text[:300],proposer_bot_id=sender_id)
+    except (automation.AutomationError,progression.ProgressionError): pass
+
+
+def family_tool_call(context,name,args):
+    from funkbot.tool_runtime import live
+    from funkbot.tools import ToolError
+    with context.db() as c:
+        c.execute('BEGIN IMMEDIATE');live(c,context)
+        try:
+            if name=='propose_to_council':
+                pid=automation.bot_propose(c,context.bot_id,context.redact(args['title']),context.redact(args['body']),args['kind'])
+                append_event(c,context.bot_id,context.run_id,'council.proposal',{'summary':args['title'][:240],'ref_id':pid})
+                return {'status':'proposed','proposal_id':pid,'note':'Recorded as a recommendation. Only the owner can act on it.'}
+            if name=='give_peer_feedback':
+                fid=automation.bot_feedback(c,context.bot_id,args['about_bot_id'],args['rating'],context.redact(args['comment']))
+                return {'status':'recorded','feedback_id':fid,'note':'Shown beside their review; never used for promotion eligibility.'}
+            automation.check_bot_allowed(c,context.bot_id,'bots_may_request')
+            rid=automation.propose_training(c,context.bot_id,args['mentorship_id'],args['objective_index'],context.redact(args['title']),context.redact(args['instructions']))
+            return {'status':'requested','request_id':rid,'note':'Waiting for the owner, who decides and accepts any cost.'}
+        except (automation.AutomationError,council.CouncilError,progression.ProgressionError,mentorship.MentorshipError) as exc: raise ToolError(str(exc))
+
+
+async def family_automation_tick():
+    with db() as c:
+        cfg=automation.settings(c)
+        if not any(cfg[k] for k in ('auto_mission_reviews','auto_system_recommendations','auto_periodic_reviews','scheduled_meetings')): return
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        planned=automation.tick(c)['meeting_id']
+    if planned and planned not in council_tasks:
+        task=asyncio.create_task(run_council_meeting(planned));council_tasks[planned]=task
+        task.add_done_callback(lambda finished:(council_tasks.pop(planned,None),finished.cancelled() or finished.exception()))
+
+
+def automation_call(fn,*args,**kwargs):
+    try: return fn(*args,**kwargs)
+    except (automation.AutomationError,council.CouncilError,progression.ProgressionError,mentorship.MentorshipError) as exc: raise HTTPException(400,str(exc))
+
+
+@app.get('/api/family/automation')
+def get_family_automation(request: Request):
+    require_auth(request)
+    with db() as c: return automation.overview(c)
+
+
+@app.put('/api/family/automation')
+def put_family_automation(body: dict,request: Request):
+    require_auth(request)
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        normalized=automation_call(automation.validate_settings,body)
+        automation.save_settings(c,normalized)
+        return automation.overview(c)
+
+
+class RequestDecisionIn(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    approve: bool
+    note: str = Field('',max_length=500)
+    accept_max_usd: str | None = Field(None,max_length=20)
+    objectives: list[str] | None = Field(None,max_length=5)
+
+
+@app.post('/api/family/requests/{request_id}/decision')
+async def decide_family_request(request_id: str,body: RequestDecisionIn,request: Request):
+    '''Owner-only. Approving a mentorship request starts it under the normal rules; approving a training request starts an ordinary mission and requires you to accept its worst-case cost.'''
+    require_auth(request)
+    with db() as c:
+        row=c.execute("SELECT kind,payload_json FROM family_requests WHERE id=? AND status='pending'",(request_id,)).fetchone()
+    if not row: raise HTTPException(404,'This request is not waiting for a decision.')
+    if body.approve and row['kind']=='training_mission':
+        p=json.loads(row['payload_json'])
+        if not body.accept_max_usd: raise HTTPException(400,'Enter the maximum cost you accept to start this training mission.')
+        await create_training_mission(p['mentorship_id'],TrainingMissionIn(objective_index=p['objective_index'],title=p['title'],instructions=p['instructions'],accept_max_usd=body.accept_max_usd),request)
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        automation_call(automation.decide_request,c,request_id,body.approve,body.note,objectives=body.objectives)
+    return {'ok':True}
+
+
 async def routine_scheduler():
     while True:
         try: await routine_tick()
         except asyncio.CancelledError: raise
         except Exception: logging.getLogger('uvicorn.error').exception('Routine scheduler tick failed')
+        try: await family_automation_tick()
+        except asyncio.CancelledError: raise
+        except Exception: logging.getLogger('uvicorn.error').exception('Family automation tick failed')
         await asyncio.sleep(5)
 
 
@@ -3057,6 +3150,7 @@ async def execute_bot_message(context, body, auto_approved=False):
             c.execute('UPDATE bot_dms SET updated_at=? WHERE id=?',(now,dm_id))
             log_id=botcomms.log(c,dm_id=dm_id,sender_id=context.bot_id,receiver_id=body.to_bot_id,kind=kind,digest=digest,run_id=context.run_id,mission_id=context.mission_id,status='sent',now=now)
             append_event(c,context.bot_id,context.run_id,'bot_message.sent',{'dm_id':dm_id,'to_bot_id':body.to_bot_id,'kind':kind,'summary':subject[:240],'approval':'link' if auto_approved else 'individual'})
+            if kind in ('nominate_colleague','request_mentorship'): family_from_message(c,context.bot_id,body.to_bot_id,kind,text)
             if kind=='escalate_blocker': inbox.add(c,context.bot_id,'bot','Blocker escalated: '+subject,text,context.run_id,context.mission_id)
             timeout=botcomms.settings(c)['reply_timeout_seconds'];sender_name=redact_text(sender['name'],keys);sender_title=redact_text(sender['title'],keys)
     if refusal: raise ToolError(refusal)

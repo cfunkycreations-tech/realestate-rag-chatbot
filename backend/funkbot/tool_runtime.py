@@ -32,6 +32,8 @@ class ToolContext:
     message_link: Callable = lambda c,sender,receiver: False
     reply_run: bool = False
     colleague_finder: Callable = None
+    family_call: Callable = None
+    family_tools: set = field(default_factory=set)
     mission_id: str | None = None
     artifact_call: Callable = None
     artifact_review: Callable = None
@@ -130,6 +132,7 @@ async def execute(context: ToolContext, name: str, args: dict, wait_decision):
             # A reply run may never start a new message: this is the recursion limit, enforced here and not only by hiding the tool.
             if context.reply_run or not context.message_call or not receiver or not expected or context.redact(receiver['name'])!=expected or parsed.to_bot_id==context.bot_id: policy='deny'
             elif policy!='deny' and context.message_link(c,context.bot_id,parsed.to_bot_id): policy='auto'
+        if name in tools.FAMILY_TOOLS and (context.reply_run or not context.family_call or name not in context.family_tools): policy='deny'
         call=tool_audit.propose(c,context.run_id,context.bot_id,name,args,context.redact,policy=policy)
         row=dict(c.execute('SELECT * FROM tool_calls WHERE id=?',(call,)).fetchone())
     try:
@@ -190,6 +193,7 @@ async def execute(context: ToolContext, name: str, args: dict, wait_decision):
                 if context.reply_run or not receiver or context.redact(receiver['name'])!=reviewed['receiver_name'] or context.message_catalog.get(reviewed['to_bot_id'])!=reviewed['receiver_name']: current='deny'
                 elif policy=='auto' and current!='deny' and context.message_link(c,context.bot_id,reviewed['to_bot_id']): current='auto'
                 elif policy=='auto': current='deny'
+            if name in tools.FAMILY_TOOLS and (context.reply_run or name not in context.family_tools): current='deny'
             if current=='deny' or (policy=='auto' and current!='auto'):
                 tool_audit.deny_policy_change(c,call);blocked=True
             else:
@@ -238,6 +242,9 @@ async def execute(context: ToolContext, name: str, args: dict, wait_decision):
             elif name=='send_bot_message':
                 if not context.message_call: raise tools.ToolError('Bot messages are unavailable.')
                 result=await context.message_call(context,tools.BotMessageArgs.model_validate(safe_args),auto_approved=policy=='auto')
+            elif name in tools.FAMILY_TOOLS:
+                if not context.family_call: raise tools.ToolError('Family actions are unavailable.')
+                result=context.family_call(context,name,safe_args)
             elif name=='find_colleague':
                 if not context.colleague_finder: raise tools.ToolError('Colleague search is unavailable.')
                 result=context.colleague_finder(context,tools.FindColleagueArgs.model_validate(safe_args))

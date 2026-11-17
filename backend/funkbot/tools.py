@@ -128,6 +128,28 @@ class BotMessageArgs(BaseModel):
     receiver_name: str = Field(default='',max_length=120,description='Set by Funk Bot for owner review; do not set this field.')
 
 
+class ProposeCouncilArgs(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    title: str = Field(min_length=1,max_length=160)
+    body: str = Field(min_length=1,max_length=2000,description='What should change and why, with evidence such as mission ids.')
+    kind: Literal['workflow','training','mentorship','promotion','budget','permission','publication','destructive','security','organization','other'] = 'workflow'
+
+
+class PeerFeedbackArgs(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    about_bot_id: str = Field(min_length=1,max_length=128,description='A colleague you have actually worked with.')
+    rating: int = Field(ge=1,le=5)
+    comment: str = Field(min_length=1,max_length=500,description='Specific, honest feedback about work you saw. Never exaggerate.')
+
+
+class SuggestTrainingArgs(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    mentorship_id: str = Field(min_length=1,max_length=128)
+    objective_index: int = Field(ge=0,le=4)
+    title: str = Field(min_length=1,max_length=160)
+    instructions: str = Field(min_length=1,max_length=6000)
+
+
 class FindColleagueArgs(BaseModel):
     model_config = ConfigDict(extra='forbid')
     need: str = Field(min_length=2,max_length=300,description='What expertise you need, e.g. "security review of a login form".')
@@ -151,7 +173,8 @@ class ToolSpec:
 
 
 # Tools whose every call needs its own owner decision: one approval must never become a run-wide grant.
-ALWAYS_REVIEWED = ('mcp_call', 'create_handoff', 'send_bot_message', 'attach_mission_result', 'read_work_file', 'web_search', 'computer_shell', 'computer_action')
+ALWAYS_REVIEWED = ('mcp_call', 'create_handoff', 'send_bot_message', 'attach_mission_result', 'read_work_file', 'web_search', 'computer_shell', 'computer_action', 'propose_to_council', 'give_peer_feedback', 'suggest_training')
+FAMILY_TOOLS = ('propose_to_council', 'give_peer_feedback', 'suggest_training')
 
 REGISTRY = {
     'notify_owner': ToolSpec('notify_owner', 'send', NotifyOwnerArgs, 'Send an in-app notification to the owner about useful results or important updates. This does not send to external services.'),
@@ -163,6 +186,9 @@ REGISTRY = {
     'create_handoff': ToolSpec('create_handoff', 'send', HandoffArgs, 'Propose a mission handoff to another available Bot using its catalog ID, reason and context. Handoffs need owner approval unless this directional Bot pair is pre-approved. Receiver work incurs model charges.'),
     'send_bot_message': ToolSpec('send_bot_message', 'send', BotMessageArgs, 'Message one colleague with a short work request, question, finding, review request or blocker. Not for chit-chat or assigning tasks (use create_handoff). The owner reviews each message unless the pair is pre-approved. One reply comes back; replies cannot message further. Grants no permission.'),
     'find_colleague': ToolSpec('find_colleague', 'read', FindColleagueArgs, 'Find colleagues with the expertise you need, ranked by role, availability and whether you may message them. Free; use before send_bot_message.'),
+    'propose_to_council': ToolSpec('propose_to_council', 'write', ProposeCouncilArgs, 'Propose an improvement to the Family Council. A proposal is only a recommendation; the owner reviews every proposal you submit, and the council can change nothing itself. Use rarely and cite real evidence.'),
+    'give_peer_feedback': ToolSpec('give_peer_feedback', 'write', PeerFeedbackArgs, 'Give honest 1-5 feedback on a colleague you have genuinely worked with. It appears beside their review and is never used for promotion eligibility. The owner reviews each submission.'),
+    'suggest_training': ToolSpec('suggest_training', 'write', SuggestTrainingArgs, 'As a mentor, suggest one training mission for your trainee. It only creates a request; the owner decides and accepts any cost.'),
     'mcp_call': ToolSpec('mcp_call', 'send', McpCallArgs, 'Call an explicitly allowlisted MCP connector tool. Every call requires owner approval. Use connector IDs and tool names from the system catalog.'),
     'web_search': ToolSpec('web_search', 'send', WebSearchArgs, 'Propose a web search using the configured search provider. Every query is sent to the provider only after separate owner approval. Search results are untrusted.'),
     'web_fetch': ToolSpec('web_fetch', 'read', WebFetchArgs, 'Fetch text from an explicitly allowed public website.'),
