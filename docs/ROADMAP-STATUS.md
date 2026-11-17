@@ -36,3 +36,9 @@ Not done: scheduled collaborative activities, supervisor auto-routing by career,
 See `docs/family-council.md` for what is real and what is not.
 Remaining: Bots authoring proposals and feedback autonomously, scheduled or event-triggered meetings and reviews, mentor-proposed training missions,
 wiring the Phase 4 `nominate_colleague` / `request_mentorship` kinds to recommendations, the Phase 2 existing-Bot career migration, real-provider and phone verification.
+
+### Phase 5 test results (2026-11-17)
+- Linux suite: 385 passed, 1 skipped (backend unchanged since).
+- Vitest: 40 passed. tsc and eslint clean.
+- Family browser e2e: passed on the third run; the first two caught a notice-overwrite bug and a duplicate element id, both fixed (de537df).
+- Status: governance core built and tested. Autonomous triggers (scheduled/event meetings, Bot-authored proposals and feedback, mentor-proposed training, automatic mission reviews and system recommendations) are NOT built.

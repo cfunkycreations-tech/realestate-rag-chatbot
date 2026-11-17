@@ -41,6 +41,7 @@ Open **Family** in the main navigation.
 
 ## Not implemented (honest list)
 - Bots do not yet *author* council proposals or give peer feedback on their own; you enter proposals, and Bot feedback has a tested function but no autonomous trigger. (Phase 4 messaging kinds `nominate_colleague` and `request_mentorship` exist but are not wired to create promotion recommendations or mentorships.)
+- Mission-triggered reviews and "system" promotion recommendations run only when you click (endpoints exist and are tested); nothing builds them automatically when a mission ends or a Bot becomes eligible.
 - Scheduled and event-triggered meetings, and automatic periodic reviews on a timer. Meetings and "Run this period's reviews" are started by you.
 - Mentors cannot propose training missions themselves; you start them.
 - Real-provider behaviour, phone behaviour and Windows/Compose upgrade of migration `0034` are not verified.
