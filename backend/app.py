@@ -2717,6 +2717,7 @@ class RoutineIn(BaseModel):
     bot_id: str = Field(min_length=1,max_length=128)
     cron: str = Field(min_length=1,max_length=120)
     timezone: str = Field(min_length=1,max_length=100)
+    paused: bool = Field(default=False,strict=True)  # create paused: never live, even for an instant
 
 
 class RoutinePauseIn(BaseModel):
@@ -3030,7 +3031,7 @@ def create_routine(body: RoutineIn, request: Request):
         c.execute('BEGIN IMMEDIATE')
         if c.execute('SELECT count(*) FROM routines').fetchone()[0]>=50: raise HTTPException(400,'At most 50 routines are allowed.')
         if not c.execute('SELECT 1 FROM bots WHERE id=?',(body.bot_id,)).fetchone(): raise HTTPException(404,'Bot not found.')
-        c.execute('INSERT INTO routines VALUES (?,?,?,?,?,?,?,?,?,?)',(rid,title,instructions,body.bot_id,body.cron.strip(),body.timezone.strip(),0,next_at,now,now))
+        c.execute('INSERT INTO routines VALUES (?,?,?,?,?,?,?,?,?,?)',(rid,title,instructions,body.bot_id,body.cron.strip(),body.timezone.strip(),int(body.paused),next_at,now,now))
     return {'id':rid}
 
 

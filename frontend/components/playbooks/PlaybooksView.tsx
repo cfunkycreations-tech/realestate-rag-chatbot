@@ -1,5 +1,5 @@
 'use client';
-import {useCallback,useEffect,useMemo,useState} from 'react';
+import {useCallback,useEffect,useMemo,useRef,useState} from 'react';
 import BotAvatar from '../team/BotAvatar';
 import type {TeamBot} from '../team/TeamDashboard';
 import {PLAYBOOKS} from './playbooks';
@@ -15,7 +15,7 @@ async function call(path:string,init?:RequestInit){
 // "What you get" pages. The stage is SAMPLE OUTPUT. The Bot shown is yours; "Set up" only creates a PAUSED routine you review first.
 export default function PlaybooksView({bots,onHire,onRoutines}:{bots:TeamBot[];onHire:()=>void;onRoutines:()=>void}){
  const [index,setIndex]=useState(0),[tick,setTick]=useState(0),[playing,setPlaying]=useState(true),[assign,setAssign]=useState<Record<string,string>>({}),[error,setError]=useState(''),[notice,setNotice]=useState(''),[busy,setBusy]=useState(false);
- const [reduced,setReduced]=useState(false);
+ const [reduced,setReduced]=useState(false),lock=useRef(false);
  const p=PLAYBOOKS[index],Stage=STAGES[p.id];
  useEffect(()=>{const q=window.matchMedia('(prefers-reduced-motion: reduce)');const sync=()=>setReduced(q.matches);sync();q.addEventListener('change',sync);return()=>q.removeEventListener('change',sync)},[]);
  useEffect(()=>{if(!playing||reduced)return;const t=window.setInterval(()=>setTick(n=>n+1),2400);return()=>window.clearInterval(t)},[playing,reduced]);
@@ -24,13 +24,13 @@ export default function PlaybooksView({bots,onHire,onRoutines}:{bots:TeamBot[];o
  const step=tick%8;
  const choose=useCallback(async(id:string)=>{setError('');setNotice('');try{const d=await call(`/playbooks/assignments/${p.id}`,{method:'PUT',body:JSON.stringify({bot_id:id||null})});setAssign(d.assignments)}catch(e){setError((e as Error).message)}},[p.id]);
  async function setup(){
-  if(!bot)return;setBusy(true);setError('');setNotice('');
+  if(!bot||lock.current)return;lock.current=true;setBusy(true);setError('');setNotice('');
   try{
    const tz=Intl.DateTimeFormat().resolvedOptions().timeZone||'UTC';
-   const made=await call('/routines',{method:'POST',body:JSON.stringify({title:`${p.name} playbook`,instructions:p.brief,bot_id:bot.id,cron:p.cron,timezone:tz})});
-   await call(`/routines/${made.id}/pause`,{method:'PUT',body:JSON.stringify({paused:true})});
+   const made=await call('/routines',{method:'POST',body:JSON.stringify({title:`${p.name} playbook`,instructions:p.brief,bot_id:bot.id,cron:p.cron,timezone:tz,paused:true})});
+   if(!made.id)throw Error('That did not work. Try again.');
    setNotice(`Created a PAUSED routine for ${bot.name}. Nothing runs or spends until you review it in Routines and resume it.`);
-  }catch(e){setError((e as Error).message)}finally{setBusy(false)}
+  }catch(e){setError((e as Error).message)}finally{lock.current=false;setBusy(false)}
  }
  const [a,b,c]=p.head,[s1,s2,s3]=p.sub;
  return <div className="missions-view pb-view" style={{['--pb' as string]:p.accent}}>
