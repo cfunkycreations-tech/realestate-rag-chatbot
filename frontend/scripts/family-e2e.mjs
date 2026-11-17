@@ -77,9 +77,19 @@ try{
  await card.getByText(/Worst-case cost: \$0\.\d{4}/).waitFor();
  await page.screenshot({path:path.join(shots,'family-mentorship-desktop.png')});
 
+ // Automation: every switch starts off; turning one on saves and never starts anything by itself.
+ await page.getByRole('tab',{name:'Automation'}).click();
+ await page.getByRole('heading',{name:'Automatic actions'}).waitFor();
+ const boxes=page.locator('input[type=checkbox]');assert.equal(await boxes.count(),7);
+ for(let i=0;i<7;i++)assert.equal(await boxes.nth(i).isChecked(),false,'automation switch '+i+' is off by default');
+ await page.getByLabel('Review finished missions automatically').click();await page.getByText('Saved.').waitFor();
+ assert.equal((await (await req.get(base+'/api/family/automation')).json()).settings.auto_mission_reviews,true);
+ await page.getByText(/No requests\./).waitFor();
+ await page.screenshot({path:path.join(shots,'family-automation-desktop.png')});
+
  // Phone width: nothing overflows on any tab.
  await page.setViewportSize({width:390,height:844});await page.waitForTimeout(300);
- for(const tab of ['Mentorship','Family Council','Career Center']){await page.getByRole('tab',{name:tab}).click();await page.waitForTimeout(250);await noScroll(tab)}
+ for(const tab of ['Automation','Mentorship','Family Council','Career Center']){await page.getByRole('tab',{name:tab}).click();await page.waitForTimeout(250);await noScroll(tab)}
  await page.screenshot({path:path.join(shots,'family-career-mobile.png')});
  assert.deepEqual(errors,[]);
  console.log('Family views passed: career center, owner-approved label-only promotion, council cost gate, mentorship rules, 390px.');
