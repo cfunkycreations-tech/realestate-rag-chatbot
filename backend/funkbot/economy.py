@@ -158,7 +158,11 @@ def model_is_free(c, gateway, model):
     return bool(c.execute('SELECT 1 FROM model_flags WHERE gateway=? AND model=?', (gateway, model)).fetchone())
 
 
-def delegation_for(c, mission_id):
+def delegation_for(c, mission_id, dm_turn_id=None):
+    if dm_turn_id:
+        # A Bot-initiated reply is charged against, and limited by, the Bot that started the exchange.
+        return c.execute('''SELECT m.origin_run_id,m.origin_bot_id,m.origin_profile FROM bot_dm_turns t
+                            JOIN bot_message_threads m ON m.dm_id=t.dm_id WHERE t.id=?''', (dm_turn_id,)).fetchone()
     if not mission_id:
         return None
     return c.execute('SELECT origin_run_id,origin_bot_id,origin_profile FROM delegation_origins WHERE mission_id=?', (mission_id,)).fetchone()

@@ -27,6 +27,11 @@ class ToolContext:
     connector_call: Callable = None
     handoff_catalog: dict = field(default_factory=dict)
     handoff_call: Callable = None
+    message_catalog: dict = field(default_factory=dict)
+    message_call: Callable = None
+    message_link: Callable = lambda c,sender,receiver: False
+    reply_run: bool = False
+    colleague_finder: Callable = None
     mission_id: str | None = None
     artifact_call: Callable = None
     artifact_review: Callable = None
@@ -117,6 +122,14 @@ async def execute(context: ToolContext, name: str, args: dict, wait_decision):
             args={'receiver_name':expected or '',**{k:v for k,v in parsed.model_dump().items() if k!='receiver_name'}}
             if not receiver or not expected or context.redact(receiver['name'])!=expected or parsed.to_bot_id==context.bot_id: policy='deny'
             elif policy!='deny' and c.execute('SELECT 1 FROM delegation_pairs WHERE from_bot_id=? AND to_bot_id=?',(context.bot_id,parsed.to_bot_id)).fetchone(): policy='auto'
+        if name=='send_bot_message':
+            parsed=tools.BotMessageArgs.model_validate(args)
+            receiver=c.execute('SELECT name FROM bots WHERE id=?',(parsed.to_bot_id,)).fetchone()
+            expected=context.message_catalog.get(parsed.to_bot_id)
+            args={'receiver_name':expected or '',**{k:v for k,v in parsed.model_dump().items() if k!='receiver_name'}}
+            # A reply run may never start a new message: this is the recursion limit, enforced here and not only by hiding the tool.
+            if context.reply_run or not context.message_call or not receiver or not expected or context.redact(receiver['name'])!=expected or parsed.to_bot_id==context.bot_id: policy='deny'
+            elif policy!='deny' and context.message_link(c,context.bot_id,parsed.to_bot_id): policy='auto'
         call=tool_audit.propose(c,context.run_id,context.bot_id,name,args,context.redact,policy=policy)
         row=dict(c.execute('SELECT * FROM tool_calls WHERE id=?',(call,)).fetchone())
     try:
@@ -125,7 +138,7 @@ async def execute(context: ToolContext, name: str, args: dict, wait_decision):
             context.notify({'type':'tool.decision','call_id':call,'decision':'policy_denied','status':'denied'})
             return {'status':'denied','message':'Owner control changed since the last screenshot. Request a new screenshot after hand back before another action.' if desktop_stale else 'The owner tool policy denied this call.'}
         if row['status']=='pending':
-            granted=name not in ('mcp_call','create_handoff','attach_mission_result','read_work_file','web_search','computer_shell','computer_action') and name in context.run_grants
+            granted=name not in tools.ALWAYS_REVIEWED and name in context.run_grants
             decision='run_grant' if granted else await wait_decision(call)
             with context.db() as c:
                 c.execute('BEGIN IMMEDIATE');live(c,context)
@@ -135,7 +148,7 @@ async def execute(context: ToolContext, name: str, args: dict, wait_decision):
                     tool_audit.approve_from_run_grant(c,call);status='approved'
                 else:
                     status=tool_audit.decide(c,call,decision)
-            if not granted and decision=='approve' and name not in ('mcp_call','create_handoff','attach_mission_result','read_work_file','web_search','computer_shell','computer_action'): context.run_grants.add(name)
+            if not granted and decision=='approve' and name not in tools.ALWAYS_REVIEWED: context.run_grants.add(name)
             context.notify({'type':'tool.decision','call_id':call,'decision':decision,'status':status})
             if status=='denied': return {'status':'denied','message':'The owner denied this tool call.'}
         with context.db() as c:
@@ -172,6 +185,11 @@ async def execute(context: ToolContext, name: str, args: dict, wait_decision):
                 reviewed=json.loads(row['arguments']);receiver=c.execute('SELECT name FROM bots WHERE id=?',(reviewed['to_bot_id'],)).fetchone()
                 if not receiver or context.redact(receiver['name'])!=reviewed['receiver_name'] or context.handoff_catalog.get(reviewed['to_bot_id'])!=reviewed['receiver_name']: current='deny'
                 elif policy=='auto' and current!='deny' and c.execute('SELECT 1 FROM delegation_pairs WHERE from_bot_id=? AND to_bot_id=?',(context.bot_id,reviewed['to_bot_id'])).fetchone(): current='auto'
+            if name=='send_bot_message':
+                reviewed=json.loads(row['arguments']);receiver=c.execute('SELECT name FROM bots WHERE id=?',(reviewed['to_bot_id'],)).fetchone()
+                if context.reply_run or not receiver or context.redact(receiver['name'])!=reviewed['receiver_name'] or context.message_catalog.get(reviewed['to_bot_id'])!=reviewed['receiver_name']: current='deny'
+                elif policy=='auto' and current!='deny' and context.message_link(c,context.bot_id,reviewed['to_bot_id']): current='auto'
+                elif policy=='auto': current='deny'
             if current=='deny' or (policy=='auto' and current!='auto'):
                 tool_audit.deny_policy_change(c,call);blocked=True
             else:
@@ -217,6 +235,12 @@ async def execute(context: ToolContext, name: str, args: dict, wait_decision):
             elif name=='create_handoff':
                 if not context.handoff_call: raise tools.ToolError('Handoffs are unavailable.')
                 result=await context.handoff_call(context,tools.HandoffArgs.model_validate(safe_args),auto_approved=policy=='auto')
+            elif name=='send_bot_message':
+                if not context.message_call: raise tools.ToolError('Bot messages are unavailable.')
+                result=await context.message_call(context,tools.BotMessageArgs.model_validate(safe_args),auto_approved=policy=='auto')
+            elif name=='find_colleague':
+                if not context.colleague_finder: raise tools.ToolError('Colleague search is unavailable.')
+                result=context.colleague_finder(context,tools.FindColleagueArgs.model_validate(safe_args))
             elif name=='web_search':
                 result=await tools.web_search(tools.WebSearchArgs.model_validate(safe_args),context.allow,context.deny)
             elif name=='web_fetch': result=await tools.web_fetch(tools.WebFetchArgs.model_validate(safe_args),context.allow,context.deny)

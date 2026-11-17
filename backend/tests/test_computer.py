@@ -460,7 +460,7 @@ def test_permission_migration_preserves_existing_computer_workspace(tmp_path):
         conn.exec_driver_sql("INSERT INTO bots VALUES ('b','Existing','Editor','instructions','mint','round','smart',1)")
         conn.exec_driver_sql("INSERT INTO computer_workspaces VALUES ('b',?,1)",(json.dumps({'dirs':[],'files':{}}),));conn.commit()
         command.upgrade(cfg,'head');conn.commit()
-        assert conn.exec_driver_sql('SELECT version_num FROM alembic_version').scalar()=='0032_economy'
+        assert conn.exec_driver_sql('SELECT version_num FROM alembic_version').scalar()=='0033_bot_comms'
         assert conn.exec_driver_sql('SELECT COUNT(*) FROM computer_workspaces').scalar()==1
         assert conn.exec_driver_sql('SELECT COUNT(*) FROM computer_permissions').scalar()==0
 

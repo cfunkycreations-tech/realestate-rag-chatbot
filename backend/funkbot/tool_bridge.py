@@ -4,6 +4,7 @@ The host application supplies the event sink and owns the run lifecycle.
 """
 from .approval_broker import ApprovalBroker
 from .tool_runtime import execute
+from .tools import ALWAYS_REVIEWED
 
 
 class ToolBridge:
@@ -16,7 +17,7 @@ class ToolBridge:
     def notify(self, event):
         # Register before sending the card, so an immediate response cannot race
         # the server's approval waiter. A run grant needs no second decision.
-        if event['type']=='tool.proposed' and event['status']=='pending' and (event['tool'] in ('mcp_call','create_handoff','attach_mission_result','read_work_file','web_search','computer_shell','computer_action') or event['tool'] not in self.context.run_grants):
+        if event['type']=='tool.proposed' and event['status']=='pending' and (event['tool'] in ALWAYS_REVIEWED or event['tool'] not in self.context.run_grants):
             self.broker.prepare(event['call_id'])
         try: self.emit(event)
         except Exception:

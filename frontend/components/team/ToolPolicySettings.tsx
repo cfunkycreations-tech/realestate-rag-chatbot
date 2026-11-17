@@ -1,9 +1,9 @@
 'use client';
 import {useEffect,useState} from 'react';
 type Policy='auto'|'ask'|'deny';
-type Policies={computer_shell:Policy;web_search:Policy;web_fetch:Policy;write_note:Policy;create_followup:Policy;create_handoff:Policy;attach_mission_result:Policy;read_work_file:Policy};
+type Policies={computer_shell:Policy;web_search:Policy;web_fetch:Policy;write_note:Policy;create_followup:Policy;create_handoff:Policy;send_bot_message:Policy;attach_mission_result:Policy;read_work_file:Policy};
 async function api(init?:RequestInit):Promise<Policies>{const response=await fetch('/api/settings/tool-policies',init),body=await response.json();if(!response.ok)throw Error(typeof body.detail==='string'?body.detail:'Could not save tool policy.');return body}
-const labels={computer_shell:'Run computer command',web_search:'Search the web',web_fetch:'Fetch public web page',write_note:'Create workspace note',create_followup:'Create follow-up',create_handoff:'Create Bot handoff',attach_mission_result:'Attach mission result',read_work_file:'Share mission and project files'} as const;
+const labels={computer_shell:'Run computer command',web_search:'Search the web',web_fetch:'Fetch public web page',write_note:'Create workspace note',create_followup:'Create follow-up',create_handoff:'Create Bot handoff',send_bot_message:'Message another Bot',attach_mission_result:'Attach mission result',read_work_file:'Share mission and project files'} as const;
 export default function ToolPolicySettings(){
  const [value,setValue]=useState<Policies|null>(null),[busy,setBusy]=useState(false),[error,setError]=useState(''),[notice,setNotice]=useState(''),[computerEnabled,setComputerEnabled]=useState<boolean|null>(null);
  useEffect(()=>{let active=true;api().then(data=>{if(active)setValue(data)}).catch(e=>{if(active)setError(e.message)});fetch('/api/settings/computer').then(r=>r.ok?r.json():null).then(data=>{if(active&&data)setComputerEnabled(data.enabled)}).catch(()=>{});return()=>{active=false}},[]);

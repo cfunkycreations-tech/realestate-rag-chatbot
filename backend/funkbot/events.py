@@ -75,7 +75,26 @@ class BotDMMessage(BaseModel):
     summary: str = Field(max_length=240)
 
 
+class BotMessageEvent(BaseModel):
+    to_bot_id: str
+    kind: str
+    summary: str
+    dm_id: str | None = None
+    approval: Literal['individual','link'] | None = None
+
+
+class BotMessageReplyEvent(BaseModel):
+    dm_id: str
+    turn_id: str
+    summary: str
+
+
 PAYLOAD_TYPES = {
+    'bot_message.sent': BotMessageEvent,
+    'bot_message.refused': BotMessageEvent,
+    'bot_message.reply': BotMessageReplyEvent,
+    'comm.link_approved': DelegationPair,
+    'comm.link_revoked': DelegationPair,
     'computer.permission_changed': ComputerPermissionChanged,
     'computer.owner_input': ComputerOwnerInput,
     'computer.takeover': ComputerTakeover,
@@ -100,7 +119,7 @@ class EventOut(BaseModel):
     id: int
     bot_id: str | None
     run_id: str | None
-    type: Literal['delegation.pair_approved', 'delegation.pair_revoked', 'computer.domains_changed', 'computer.takeover', 'computer.owner_input', 'computer.permission_changed', 'bot_dm.message', 'handoff.created', 'run.started', 'run.finished', 'bot.state_changed', 'message.sent', 'error.raised', 'group.session_started', 'group.session_ended', 'group.delegated', 'group.replied']
+    type: Literal['bot_message.sent', 'bot_message.refused', 'bot_message.reply', 'comm.link_approved', 'comm.link_revoked', 'delegation.pair_approved', 'delegation.pair_revoked', 'computer.domains_changed', 'computer.takeover', 'computer.owner_input', 'computer.permission_changed', 'bot_dm.message', 'handoff.created', 'run.started', 'run.finished', 'bot.state_changed', 'message.sent', 'error.raised', 'group.session_started', 'group.session_ended', 'group.delegated', 'group.replied']
     payload: dict
     created_at: float
 

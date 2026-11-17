@@ -367,3 +367,20 @@ input[type=file]::file-selector-button:hover{box-shadow:0 0 12px color-mix(in sr
 .command-layout{flex:1 0 460px;grid-template-columns:minmax(0,1fr) 300px}
 @media(max-width:1000px){.command-layout{grid-template-columns:minmax(0,1fr) 240px}}
 @media(max-width:700px){.command-layout{flex:none}}
+
+/* Bot-started conversations (owner observation view) and messaging settings */
+.bc-tabs{display:flex;gap:8px;margin:0 0 12px;flex-wrap:wrap}
+.bc-tabs button{border:1px solid var(--edge);background:transparent;color:var(--ink);padding:8px 14px;border-radius:999px;cursor:pointer}
+.bc-tabs button.active{background:var(--accent);color:var(--surf);border-color:var(--accent)}
+.bc-panel{display:flex;flex-direction:column;gap:12px;min-width:0}
+.bc-card{border:1px solid var(--edge);border-radius:12px;padding:12px 14px;background:color-mix(in srgb,var(--surf) 87%,transparent);min-width:0}
+.bc-head{display:flex;justify-content:space-between;align-items:center;gap:10px;width:100%;background:none;border:0;color:var(--ink);cursor:pointer;padding:0;text-align:left;font:inherit}
+.bc-route{overflow-wrap:anywhere}
+.bc-why{margin:8px 0;overflow-wrap:anywhere}
+.bc-facts{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px;margin:0}
+.bc-facts div{min-width:0}.bc-facts dt{font-size:11px;letter-spacing:.06em;text-transform:uppercase;opacity:.75}.bc-facts dd{margin:2px 0 0;overflow-wrap:anywhere}
+.bc-outcome{margin:8px 0 0;overflow-wrap:anywhere}
+.bc-history{margin-top:10px;border-top:1px solid var(--edge);padding-top:8px;max-height:320px;overflow-y:auto}
+.bc-refused ul{margin:8px 0 0;padding-left:18px}.bc-refused li{overflow-wrap:anywhere;margin:4px 0}
+.bc-limits{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px}
+.bc-settings .checkline{display:flex;gap:8px;align-items:center}
