@@ -27,3 +27,12 @@ skipped, new content becomes a new version, and roles the owner edited are kept.
 
 ## Phase 3 — Token wallets and Economy Mode (this change)
 See `docs/economy.md`.
+
+## Phase 4 — Bot-initiated messaging (feature/bot-comms)
+See `docs/family-council.md`. Verified with mocked models: backend suite, Vitest, and a browser run of the owner view and settings.
+Not done: scheduled collaborative activities, supervisor auto-routing by career, routing that uses mission and tool context beyond keyword scoring.
+
+## Phase 5 — careers, mentorship, Family Council (feature/family-council)
+See `docs/family-council.md` for what is real and what is not.
+Remaining: Bots authoring proposals and feedback autonomously, scheduled or event-triggered meetings and reviews, mentor-proposed training missions,
+wiring the Phase 4 `nominate_colleague` / `request_mentorship` kinds to recommendations, the Phase 2 existing-Bot career migration, real-provider and phone verification.

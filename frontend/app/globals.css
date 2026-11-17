@@ -384,3 +384,22 @@ input[type=file]::file-selector-button:hover{box-shadow:0 0 12px color-mix(in sr
 .bc-refused ul{margin:8px 0 0;padding-left:18px}.bc-refused li{overflow-wrap:anywhere;margin:4px 0}
 .bc-limits{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px}
 .bc-settings .checkline{display:flex;gap:8px;align-items:center}
+
+/* Family: Council, Career Center, Mentorship */
+.fam-panel{display:flex;flex-direction:column;gap:12px;min-width:0}
+.fam-card{border:1px solid var(--edge);border-radius:12px;padding:12px 14px;background:color-mix(in srgb,var(--surf) 87%,transparent);min-width:0;display:flex;flex-direction:column;gap:8px;overflow-wrap:anywhere}
+.fam-card.open{border-color:var(--accent)}
+.fam-card h2,.fam-card h3{margin:4px 0}
+.fam-head{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap}
+.fam-meta{margin:0;font-size:13px;opacity:.8}
+.fam-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px}
+.fam-ladder{display:flex;gap:6px;list-style:none;margin:0;padding:0;flex-wrap:wrap}
+.fam-ladder li{border:1px solid var(--edge);border-radius:999px;padding:6px 12px;display:flex;gap:8px;align-items:center}
+.fam-ladder small{opacity:.75}
+.fam-actions{display:flex;gap:8px;flex-wrap:wrap}
+.fam-plan{border:1px dashed var(--accent);border-radius:10px;padding:10px 12px;display:flex;flex-direction:column;gap:8px}
+.fam-votes{margin:0;padding-left:18px}.fam-votes li{margin:4px 0;overflow-wrap:anywhere}
+.fam-records{margin:0;padding-left:18px}.fam-records li{margin:4px 0;overflow-wrap:anywhere}
+.fam-members{border:1px solid var(--edge);border-radius:10px;padding:8px 12px;display:flex;flex-direction:column;gap:4px}
+.fam-members .checkline{display:flex;gap:8px;align-items:center}
+.fam-profile{border-color:var(--accent)}
