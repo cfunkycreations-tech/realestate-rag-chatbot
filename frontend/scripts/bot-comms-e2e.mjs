@@ -54,7 +54,7 @@ try{
  assert.equal((await (await req.get(base+'/api/settings/bot-comms')).json()).enabled,true);
  await page.getByLabel('Sending Bot').last().selectOption(a);await page.getByLabel('Receiving Bot').last().selectOption(b);
  await page.getByRole('button',{name:'Approve pair'}).last().click();
- await page.getByText('Dev → Sec').waitFor();
+ await page.locator('.tool-policy-row',{hasText:'Dev → Sec'}).waitFor();
  assert.equal((await (await req.get(base+'/api/settings/comm-links')).json()).length,1);
  await page.screenshot({path:path.join(shots,'bot-comms-settings-desktop.png')});
  assert.deepEqual(errors,[]);
