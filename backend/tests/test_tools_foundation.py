@@ -11,7 +11,7 @@ from funkbot import tools
 
 
 def test_registry_is_typed():
-    assert set(tools.REGISTRY)=={'remember_fact','notify_owner','web_fetch','write_note','create_followup','mcp_call','create_handoff','attach_mission_result','read_work_file','web_search','computer_shell','computer_action'}
+    assert set(tools.REGISTRY)=={'remember_fact','notify_owner','web_fetch','write_note','create_followup','mcp_call','create_handoff','attach_mission_result','read_work_file','web_search','computer_shell','computer_action','send_bot_message','find_colleague'}
     assert tools.REGISTRY['web_fetch'].risk=='read'
     assert tools.REGISTRY['write_note'].risk=='write'
     with pytest.raises(ValidationError): tools.WebFetchArgs(url='https://example.com',extra='not allowed')
