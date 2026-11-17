@@ -2875,6 +2875,42 @@ def automation_call(fn,*args,**kwargs):
     except (automation.AutomationError,council.CouncilError,progression.ProgressionError,mentorship.MentorshipError) as exc: raise HTTPException(400,str(exc))
 
 
+PLAYBOOK_IDS=('second-brain','build-agent','swarm','morning-brief','repurposer','subscription-auditor','group-chat-manager','lead-builder','competitor-monitor','x-assistant')
+
+
+@app.get('/api/playbooks/assignments')
+def get_playbook_assignments(request: Request):
+    require_auth(request)
+    with db() as c:
+        row=c.execute("SELECT value FROM config WHERE key='playbook_bots'").fetchone()
+        try: saved=json.loads(row['value']) if row else {}
+        except ValueError: saved={}
+        live={r['id'] for r in c.execute('SELECT id FROM bots').fetchall()}
+    return {'assignments':{k:v for k,v in saved.items() if k in PLAYBOOK_IDS and v in live}}
+
+
+class PlaybookAssignIn(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    bot_id: str | None = Field(None,min_length=1,max_length=128)
+
+
+@app.put('/api/playbooks/assignments/{playbook_id}')
+def put_playbook_assignment(playbook_id: str,body: PlaybookAssignIn,request: Request):
+    '''Records which Bot a playbook page shows. Display only: it grants nothing and starts nothing.'''
+    require_auth(request)
+    if playbook_id not in PLAYBOOK_IDS: raise HTTPException(404,'Unknown playbook.')
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        if body.bot_id and not c.execute('SELECT 1 FROM bots WHERE id=?',(body.bot_id,)).fetchone(): raise HTTPException(404,'Bot not found.')
+        row=c.execute("SELECT value FROM config WHERE key='playbook_bots'").fetchone()
+        try: saved=json.loads(row['value']) if row else {}
+        except ValueError: saved={}
+        if body.bot_id: saved[playbook_id]=body.bot_id
+        else: saved.pop(playbook_id,None)
+        c.execute("INSERT OR REPLACE INTO config VALUES ('playbook_bots',?)",(json.dumps(saved),))
+    return get_playbook_assignments(request)
+
+
 @app.get('/api/family/automation')
 def get_family_automation(request: Request):
     require_auth(request)
