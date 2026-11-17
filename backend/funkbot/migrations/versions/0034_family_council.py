@@ -82,7 +82,7 @@ def upgrade():
         status TEXT NOT NULL CHECK(status IN ('planned','running','done','failed','cancelled')),
         proposal_ids_json TEXT NOT NULL, member_ids_json TEXT NOT NULL,
         cap_nanos INTEGER NOT NULL, estimate_nanos INTEGER NOT NULL,
-        created_at REAL NOT NULL, started_at REAL, finished_at REAL, error TEXT
+        call_dm_ids_json TEXT NOT NULL DEFAULT '[]', created_at REAL NOT NULL, started_at REAL, finished_at REAL, error TEXT
     )''')
     op.execute('''CREATE TABLE council_proposals (
         id TEXT PRIMARY KEY, title TEXT NOT NULL, body TEXT NOT NULL,

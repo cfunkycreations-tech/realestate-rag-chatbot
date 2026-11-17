@@ -41,7 +41,7 @@ from funkbot.memory_capture import save_learned, capture as capture_memory, norm
 from funkbot.skills import parse_invocation, parse_markdown
 from funkbot.schedule import next_occurrence
 from funkbot.backup import create as create_backup, restore as stage_restore, validate_stage, BackupError, MAX_TOTAL as MAX_BACKUP_TOTAL
-from funkbot import workspace_pointer, careers, economy, mission_control, botcomms, progression, mentorship
+from funkbot import workspace_pointer, careers, economy, mission_control, botcomms, progression, mentorship, council
 from funkbot.tools import ALWAYS_REVIEWED
 from alembic.config import Config as AlembicConfig
 from alembic.script import ScriptDirectory
@@ -156,6 +156,7 @@ mission_tasks = {}
 lab_tasks = {}
 group_chat_tasks = {}
 dm_tasks = {}
+council_tasks = {}
 learning_tasks = {}
 
 # Single-worker quiescence: block new HTTP work while waiting for already
@@ -267,6 +268,7 @@ async def put_global_pause(body: PauseIn, request: Request):
             c.execute("UPDATE lab_runs SET status='failed',error='Stopped by global pause.',updated_at=? WHERE status='queued'",(now,))
             c.execute("UPDATE group_chat_turns SET status='cancelled',error='Stopped by global pause.',active_run_id=NULL,updated_at=? WHERE status IN ('queued','running')",(now,))
             c.execute("UPDATE bot_dm_turns SET status='cancelled',error='Stopped by global pause.',active_run_id=NULL,updated_at=? WHERE status IN ('queued','running')",(now,))
+            c.execute("UPDATE council_meetings SET status='cancelled',error='Stopped by global pause.',finished_at=? WHERE status IN ('planned','running')",(now,))
     if body.paused:
         # Single-worker runtime: cancel current tasks after atomically blocking
         # new starts. Already completed external actions cannot be reversed.
@@ -274,7 +276,7 @@ async def put_global_pause(body: PauseIn, request: Request):
         for job in list(jobs.values()):
             if not job['done'] and job.get('task'):
                 job['user_cancelled']=True;job['task'].cancel();tasks.add(job['task'])
-        for task in [*mission_tasks.values(),*lab_tasks.values(),*group_chat_tasks.values(),*dm_tasks.values(),*learning_tasks.values()]:
+        for task in [*mission_tasks.values(),*lab_tasks.values(),*group_chat_tasks.values(),*dm_tasks.values(),*council_tasks.values(),*learning_tasks.values()]:
             if not task.done(): task.cancel();tasks.add(task)
         if tasks: await asyncio.gather(*tasks,return_exceptions=True)
     return {'paused':body.paused}
@@ -1583,6 +1585,7 @@ def mark_interrupted_runs():
         c.execute("UPDATE group_chat_turns SET status='failed',error='Backend restarted before the group turn finished.',active_run_id=NULL,updated_at=? WHERE status IN ('queued','running')",(time.time(),))
         c.execute("UPDATE bot_dm_turns SET status='failed',error='Backend restarted before the Bot DM finished.',active_run_id=NULL,updated_at=? WHERE status IN ('queued','running')",(time.time(),))
         c.execute("UPDATE bot_message_log SET status='failed',detail='Backend restarted before the reply finished.' WHERE status='sent'")
+        c.execute("UPDATE council_meetings SET status='failed',error='Backend restarted before the meeting finished.',finished_at=? WHERE status IN ('planned','running')",(time.time(),))
         # Queued work is not silently replayed after an unexpected restart.
         c.execute("UPDATE missions SET status='failed',error=?,updated_at=? WHERE status IN ('running','waiting_approval') OR (status='queued' AND id NOT IN (SELECT mission_id FROM routine_runs))",('Backend restarted before the mission finished.',time.time()))
         c.execute("UPDATE mission_runs SET status='failed',error=?,updated_at=? WHERE status IN ('queued','running','waiting_approval')",('Backend restarted before the mission finished.',time.time()))
@@ -3143,6 +3146,231 @@ def revoke_comm_link(body: CommLinkIn, request: Request):
         c.execute('DELETE FROM comm_links WHERE from_bot_id=? AND to_bot_id=?',(body.from_bot_id,body.to_bot_id))
         append_event(c,body.from_bot_id,None,'comm.link_revoked',{'to_bot_id':body.to_bot_id})
     return {'ok':True}
+
+
+# ---- Phase 5: Family Council (owner-started, capped, recommendations only) ----
+class CouncilSettingsIn(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    enabled: bool
+    max_members: int = 5
+    max_proposals_per_meeting: int = 3
+    meeting_max_usd: str = Field('0.10', max_length=12)
+    reply_timeout_seconds: int = 120
+    max_open_proposals: int = 20
+
+
+class CouncilMembersIn(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    bot_ids: list[str] = Field(max_length=8)
+
+
+class ProposalIn(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    title: str = Field(min_length=1, max_length=160)
+    body: str = Field(min_length=1, max_length=2000)
+    kind: str = Field(max_length=24)
+    proposer_bot_id: str | None = Field(None, max_length=128)
+
+
+class CouncilDecisionIn(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    approve: bool
+    note: str = Field('', max_length=500)
+
+
+class MeetingIn(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    proposal_ids: list[str] = Field(min_length=1, max_length=5)
+
+
+def council_call(fn, *args, **kwargs):
+    try:
+        return fn(*args, **kwargs)
+    except council.CouncilError as exc:
+        raise HTTPException(400, str(exc))
+
+
+def meeting_spent_nanos(c, meeting_id):
+    row = c.execute('SELECT call_dm_ids_json FROM council_meetings WHERE id=?', (meeting_id,)).fetchone()
+    return sum(int(botcomms.thread_usage(c, dm)[0]) for dm in json.loads(row['call_dm_ids_json'])) if row else 0
+
+
+def finish_meeting(meeting_id, status, error=None):
+    with db() as c:
+        c.execute("UPDATE council_meetings SET status=?,error=?,finished_at=? WHERE id=? AND status IN ('planned','running')", (status, error, time.time(), meeting_id))
+
+
+async def council_vote_call(meeting_id, voter, proposals, timeout):
+    """One tool-less, budgeted reply from one member, through the same start_chat path every other reply uses."""
+    dm_id = str(uuid.uuid4()); turn_id = str(uuid.uuid4()); now = time.time()
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE'); require_unpaused(c)
+        c.execute('INSERT INTO bot_dms VALUES (?,?,?,?,?,?)', (dm_id, ('Council vote: ' + ', '.join(p['title'] for p in proposals))[:120], None, voter['id'], now, now))
+        c.execute("INSERT INTO bot_dm_turns VALUES (?,?,'running',NULL,NULL,?,?)", (turn_id, dm_id, now, now))
+        ids = json.loads(c.execute('SELECT call_dm_ids_json FROM council_meetings WHERE id=?', (meeting_id,)).fetchone()['call_dm_ids_json']) + [dm_id]
+        c.execute('UPDATE council_meetings SET call_dm_ids_json=? WHERE id=?', (json.dumps(ids), meeting_id))
+        prompt = council.vote_prompt(c, voter, proposals)
+    run_id = None
+    try:
+        async with asyncio.timeout(timeout):
+            for attempt in range(30):
+                try:
+                    run = await start_chat(voter['id'], ChatIn(content=prompt[:20000]), dm_turn_id=turn_id, dm_id=dm_id, dm_role='receiver'); break
+                except HTTPException as exc:
+                    if exc.status_code == 409 and exc.detail == 'This Bot is already responding.' and attempt < 29: await asyncio.sleep(1); continue
+                    raise ValueError(str(exc.detail)) from exc
+            run_id = run['job_id']; await jobs[run_id]['task']
+        with db() as c:
+            status = c.execute('SELECT status FROM runs WHERE id=?', (run_id,)).fetchone()
+            reply = c.execute("SELECT content FROM bot_dm_messages WHERE run_id=? AND role='receiver'", (run_id,)).fetchone()
+        if not status or status['status'] != 'done' or not reply: raise ValueError('The reply could not be completed.')
+        with db() as c: c.execute("UPDATE bot_dm_turns SET status='done',active_run_id=NULL,updated_at=? WHERE id=? AND status='running'", (time.time(), turn_id))
+        return reply['content'], None
+    except TimeoutError:
+        job = jobs.get(run_id) if run_id else None
+        if job and not job['done']: job['user_cancelled'] = True; job['task'].cancel()
+        err = 'The reply timed out.'
+    except asyncio.CancelledError:
+        with db() as c: c.execute("UPDATE bot_dm_turns SET status='cancelled',error='Stopped.',active_run_id=NULL,updated_at=? WHERE id=? AND status IN ('queued','running')", (time.time(), turn_id))
+        raise
+    except Exception as exc:
+        err = redact(str(exc) if isinstance(exc, (ValueError, HTTPException)) else 'The reply could not continue unexpectedly.')[:300]
+    with db() as c: c.execute("UPDATE bot_dm_turns SET status='failed',error=?,active_run_id=NULL,updated_at=? WHERE id=? AND status IN ('queued','running')", (err, time.time(), turn_id))
+    return None, err
+
+
+async def run_council_meeting(meeting_id):
+    try:
+        with db() as c:
+            c.execute('BEGIN IMMEDIATE'); require_unpaused(c)
+            row = c.execute("SELECT * FROM council_meetings WHERE id=? AND status='planned'", (meeting_id,)).fetchone()
+            if not row: return
+            c.execute("UPDATE council_meetings SET status='running',started_at=? WHERE id=?", (time.time(), meeting_id))
+            member_ids = json.loads(row['member_ids_json']); proposal_ids = json.loads(row['proposal_ids_json']); cap = row['cap_nanos']
+            timeout = council.settings(c)['reply_timeout_seconds']
+            proposals = [dict(c.execute('SELECT * FROM council_proposals WHERE id=? AND status=?', (pid, 'open')).fetchone()) for pid in proposal_ids]
+        for bot_id in member_ids:
+            with db() as c:
+                require_unpaused(c)
+                voter = c.execute('SELECT id,name,title,profile FROM bots WHERE id=?', (bot_id,)).fetchone()
+                if not voter: continue
+                voter = dict(voter)
+                ceiling = economy.profile_cost(c, voter['profile'])
+                if ceiling is None or meeting_spent_nanos(c, meeting_id) + ceiling > cap:
+                    c.execute('BEGIN IMMEDIATE'); council.record_votes(c, meeting_id, voter['id'], voter['name'], proposal_ids, '', failure='Skipped: the meeting spending cap would be exceeded.'); continue
+            text, err = await council_vote_call(meeting_id, voter, proposals, timeout)
+            with db() as c:
+                c.execute('BEGIN IMMEDIATE'); council.record_votes(c, meeting_id, voter['id'], voter['name'], proposal_ids, text or '', failure=err)
+        with db() as c:
+            c.execute('BEGIN IMMEDIATE')
+            for pid in proposal_ids:
+                status = council.decide_from_votes(c, pid, len(member_ids), meeting_id)
+                title = c.execute('SELECT title FROM council_proposals WHERE id=?', (pid,)).fetchone()
+                if status: append_event(c, None, None, 'council.decision', {'summary': f"{title['title'][:120]}: {status}", 'ref_id': pid})
+            append_event(c, None, None, 'council.meeting', {'summary': f'Council meeting finished ({len(proposal_ids)} proposal(s))', 'ref_id': meeting_id})
+        finish_meeting(meeting_id, 'done')
+    except asyncio.CancelledError:
+        finish_meeting(meeting_id, 'cancelled', 'Stopped.'); raise
+    except HTTPException as exc:
+        finish_meeting(meeting_id, 'cancelled', str(exc.detail)[:300])
+    except Exception as exc:
+        finish_meeting(meeting_id, 'failed', redact(str(exc))[:300])
+
+
+@app.get('/api/council')
+def council_overview(request: Request):
+    require_auth(request)
+    with db() as c: return council.overview(c)
+
+
+@app.put('/api/council/settings')
+def council_put_settings(body: CouncilSettingsIn, request: Request):
+    require_auth(request)
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        council.save_settings(c, council_call(council.validate_settings, body.model_dump()))
+        return council.settings(c)
+
+
+@app.put('/api/council/members')
+def council_put_members(body: CouncilMembersIn, request: Request):
+    require_auth(request)
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        council_call(council.set_members, c, body.bot_ids)
+        return {'members': council.members(c)}
+
+
+@app.post('/api/council/proposals')
+def council_propose(body: ProposalIn, request: Request):
+    require_auth(request)
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        if body.proposer_bot_id and not c.execute('SELECT 1 FROM bots WHERE id=?', (body.proposer_bot_id,)).fetchone(): raise HTTPException(404, 'Bot not found.')
+        pid = council_call(council.propose, c, body.title, body.body, body.kind, 'bot' if body.proposer_bot_id else 'owner', body.proposer_bot_id)
+        append_event(c, body.proposer_bot_id, None, 'council.proposal', {'summary': body.title[:200], 'ref_id': pid})
+        return {'id': pid}
+
+
+@app.delete('/api/council/proposals/{proposal_id}')
+def council_withdraw(proposal_id: str, request: Request):
+    require_auth(request)
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        council_call(council.withdraw, c, proposal_id)
+    return {'ok': True}
+
+
+@app.post('/api/council/proposals/{proposal_id}/decision')
+def council_owner_decision(proposal_id: str, body: CouncilDecisionIn, request: Request):
+    require_auth(request)
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        council_call(council.owner_decide, c, proposal_id, body.approve, body.note)
+        append_event(c, None, None, 'council.decision', {'summary': 'Owner ' + ('approved' if body.approve else 'declined') + ' a council recommendation', 'ref_id': proposal_id})
+    return {'ok': True}
+
+
+@app.post('/api/council/meetings')
+def council_plan_meeting(body: MeetingIn, request: Request):
+    """Plans a meeting and returns its worst-case cost. Nothing runs until the owner starts it."""
+    require_auth(request)
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE'); require_unpaused(c)
+        mid = council_call(council.plan_meeting, c, body.proposal_ids)
+        return council.meeting_out(c, mid)
+
+
+@app.get('/api/council/meetings/{meeting_id}')
+def council_get_meeting(meeting_id: str, request: Request):
+    require_auth(request)
+    with db() as c:
+        out = council.meeting_out(c, meeting_id)
+        if not out: raise HTTPException(404, 'Meeting not found.')
+        return out
+
+
+@app.post('/api/council/meetings/{meeting_id}/start')
+async def council_start_meeting(meeting_id: str, request: Request):
+    require_auth(request)
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE'); require_unpaused(c)
+        if not council.settings(c)['enabled']: raise HTTPException(400, 'The Family Council is turned off.')
+        if not c.execute("SELECT 1 FROM council_meetings WHERE id=? AND status='planned'", (meeting_id,)).fetchone(): raise HTTPException(409, 'This meeting is not waiting to start.')
+    task = asyncio.create_task(run_council_meeting(meeting_id)); council_tasks[meeting_id] = task
+    task.add_done_callback(lambda finished: (council_tasks.pop(meeting_id, None), finished.cancelled() or finished.exception()))
+    return {'ok': True}
+
+
+@app.post('/api/council/meetings/{meeting_id}/cancel')
+async def council_cancel_meeting(meeting_id: str, request: Request):
+    require_auth(request)
+    task = council_tasks.get(meeting_id)
+    if task and not task.done():
+        task.cancel(); await asyncio.gather(task, return_exceptions=True)
+    finish_meeting(meeting_id, 'cancelled', 'Cancelled by the owner.')
+    return {'ok': True}
+
 
 
 # ---- Phase 5: mentorship (owner-only; training missions are ordinary missions the owner approves) ----
