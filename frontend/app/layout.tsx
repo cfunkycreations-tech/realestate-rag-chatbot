@@ -1,4 +1,5 @@
 import '@fontsource/audiowide/400.css';
+import '@fontsource-variable/inter';
 import '@fontsource-variable/orbitron';
 import '@fontsource-variable/jetbrains-mono';
 import './globals.css';

@@ -153,10 +153,11 @@
 .banner-image.banner-fit{background-size:contain!important;background-position:center!important;background-repeat:no-repeat;transform:none!important}
 .command-banner.has-image .banner-settings{z-index:3;background:color-mix(in srgb,var(--surf) 80%,transparent)}
 
-html,body{font-family:"Audiowide","Orbitron Variable",system-ui,sans-serif;font-synthesis:none;color:var(--ink)}
+html,body{font-family:"Inter Variable","Inter",system-ui,sans-serif;font-synthesis:none;color:var(--ink)}
 button,input,textarea,select{font-family:inherit}
 h1,h2,h3,strong,b,.brand,.brand span,.command-nav button,.primary,.secondary,.tabs button{font-family:"Audiowide",system-ui,sans-serif;font-weight:400}
-small,label,th,h4,h5,h6,.eyebrow,[class*=eyebrow],[class*=kicker],.command-nav small,.composer-footer,.message-meta span,.timeline-start,.profile-chip,.auth-top>span,.auth-bottom{font-family:"Orbitron Variable","Orbitron",system-ui,sans-serif}
+small,label,th,h4,h5,h6,.eyebrow,[class*=eyebrow],[class*=kicker],.command-nav small,.composer-footer,.message-meta span,.timeline-start,.profile-chip,.auth-top>span,.auth-bottom{font-family:"Inter Variable","Inter",system-ui,sans-serif}
+p strong,p b,li strong,li b,.markdown strong,.markdown b,dd strong,dd b{font-family:"Inter Variable","Inter",system-ui,sans-serif;font-weight:650}
 code,pre,kbd,samp,input,textarea,select,.markdown code,.markdown pre,[class*=mono],[class*=cost],[class*=audit] td,td{font-family:"JetBrains Mono Variable","JetBrains Mono",ui-monospace,monospace}
 *{color:inherit}
 body,p,span,li,div,td,th,a,button,label,small,strong,h1,h2,h3,h4,h5,h6,input,textarea,select{color:var(--ink)}

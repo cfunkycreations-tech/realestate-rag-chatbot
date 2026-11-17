@@ -48,7 +48,7 @@ function drawScene(ctx:CanvasRenderingContext2D,bots:OfficeBot[],characters:Offi
     const p=desk(index),x=p.x*TILE,y=p.y*TILE;
     const glow=ctx.createRadialGradient(x,y,2,x,y,50);glow.addColorStop(0,palette.purple);glow.addColorStop(1,'transparent');ctx.save();ctx.globalAlpha=.23;ctx.fillStyle=glow;ctx.fillRect(x-50,y-50,100,100);ctx.restore();
     rounded(ctx,x-29,y+12,58,13,4,palette.panel);ctx.strokeStyle=palette.gold;ctx.lineWidth=1;ctx.strokeRect(x-29,y+12,58,13);
-    ctx.textAlign='center';ctx.fillStyle=palette.ink;ctx.font='15px Audiowide, sans-serif';ctx.fillText(bot.name,x,y+41,92);ctx.fillStyle=palette.muted;ctx.font='13px Orbitron Variable, sans-serif';ctx.fillText(jobTitle(bot),x,y+56,92);ctx.textAlign='start';
+    ctx.textAlign='center';ctx.fillStyle=palette.ink;ctx.font='15px Audiowide, sans-serif';ctx.fillText(bot.name,x,y+41,92);ctx.fillStyle=palette.muted;ctx.font='13px Inter Variable, sans-serif';ctx.fillText(jobTitle(bot),x,y+56,92);ctx.textAlign='start';
   });
   characters.forEach((character,index)=>{
     const point=positionAt(character.motion,now,reduced),x=point.x*TILE,y=point.y*TILE;
