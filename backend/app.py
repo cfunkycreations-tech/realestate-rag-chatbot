@@ -41,7 +41,7 @@ from funkbot.memory_capture import save_learned, capture as capture_memory, norm
 from funkbot.skills import parse_invocation, parse_markdown
 from funkbot.schedule import next_occurrence
 from funkbot.backup import create as create_backup, restore as stage_restore, validate_stage, BackupError, MAX_TOTAL as MAX_BACKUP_TOTAL
-from funkbot import workspace_pointer, careers, economy, mission_control, botcomms, progression
+from funkbot import workspace_pointer, careers, economy, mission_control, botcomms, progression, mentorship
 from funkbot.tools import ALWAYS_REVIEWED
 from alembic.config import Config as AlembicConfig
 from alembic.script import ScriptDirectory
@@ -3143,6 +3143,117 @@ def revoke_comm_link(body: CommLinkIn, request: Request):
         c.execute('DELETE FROM comm_links WHERE from_bot_id=? AND to_bot_id=?',(body.from_bot_id,body.to_bot_id))
         append_event(c,body.from_bot_id,None,'comm.link_revoked',{'to_bot_id':body.to_bot_id})
     return {'ok':True}
+
+
+# ---- Phase 5: mentorship (owner-only; training missions are ordinary missions the owner approves) ----
+class ObjectiveIn(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    skill: str = Field(min_length=1, max_length=120)
+    target_missions: int = Field(1, ge=1, le=10)
+    source: Literal['employee_dna', 'custom'] = 'custom'
+
+
+class MentorshipIn(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    mentor_id: str = Field(min_length=1, max_length=128)
+    trainee_id: str = Field(min_length=1, max_length=128)
+    objectives: list[ObjectiveIn] | None = Field(None, max_length=5)
+    min_verified: int = Field(1, ge=0, le=50)
+    min_reliability: int = Field(70, ge=0, le=100)
+    note: str = Field('', max_length=500)
+
+
+class TrainingMissionIn(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    objective_index: int = Field(ge=0, le=4)
+    title: str = Field(min_length=1, max_length=160)
+    instructions: str = Field(min_length=1, max_length=6000)
+    accept_max_usd: str = Field(min_length=1, max_length=24)
+
+
+def mentor_call(fn, *args, **kwargs):
+    try:
+        return fn(*args, **kwargs)
+    except mentorship.MentorshipError as exc:
+        raise HTTPException(400, str(exc))
+
+
+@app.get('/api/mentorships')
+def list_mentorships(request: Request):
+    require_auth(request)
+    with db() as c:
+        return {'mentorships': mentorship.list_all(c), 'max_trainees_per_mentor': mentorship.MAX_TRAINEES,
+                'authority_note': 'A mentorship grants no permissions, tools, spending or access. Graduating does not promote anyone.'}
+
+
+@app.get('/api/mentorships/suggest')
+def suggest_objectives(trainee_id: str, request: Request):
+    require_auth(request)
+    with db() as c: return {'objectives': mentorship.suggest_objectives(c, trainee_id)}
+
+
+@app.post('/api/mentorships')
+def start_mentorship(body: MentorshipIn, request: Request):
+    require_auth(request)
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        objectives = [o.model_dump() for o in body.objectives] if body.objectives else mentorship.suggest_objectives(c, body.trainee_id)
+        if not objectives: raise HTTPException(400, 'Add at least one skill objective (this Bot has no Employee DNA skills to suggest).')
+        mid = mentor_call(mentorship.start, c, body.mentor_id, body.trainee_id, objectives, body.min_verified, body.min_reliability, body.note)
+        append_event(c, body.trainee_id, None, 'mentorship.started', {'summary': 'Mentorship started', 'ref_id': mid})
+        return {'id': mid}
+
+
+@app.post('/api/mentorships/{mentorship_id}/end')
+def end_mentorship(mentorship_id: str, request: Request):
+    require_auth(request)
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        mentor_call(mentorship.finish, c, mentorship_id, False)
+        row = c.execute('SELECT trainee_id FROM mentorships WHERE id=?', (mentorship_id,)).fetchone()
+        append_event(c, row['trainee_id'], None, 'mentorship.ended', {'summary': 'Mentorship ended', 'ref_id': mentorship_id})
+    return {'ok': True}
+
+
+@app.post('/api/mentorships/{mentorship_id}/graduate')
+def graduate_mentorship(mentorship_id: str, request: Request):
+    require_auth(request)
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        mentor_call(mentorship.finish, c, mentorship_id, True)
+        row = c.execute('SELECT trainee_id FROM mentorships WHERE id=?', (mentorship_id,)).fetchone()
+        append_event(c, row['trainee_id'], None, 'mentorship.ended', {'summary': 'Graduated from mentorship', 'ref_id': mentorship_id})
+    return {'ok': True}
+
+
+@app.get('/api/mentorships/{mentorship_id}/estimate')
+def training_estimate(mentorship_id: str, request: Request):
+    require_auth(request)
+    with db() as c:
+        row = c.execute("SELECT trainee_id FROM mentorships WHERE id=? AND status='active'", (mentorship_id,)).fetchone()
+        if not row: raise HTTPException(404, 'Active mentorship not found.')
+        return mentor_call(mentorship.mission_estimate, c, row['trainee_id'])
+
+
+@app.post('/api/mentorships/{mentorship_id}/training-missions')
+async def create_training_mission(mentorship_id: str, body: TrainingMissionIn, request: Request):
+    """Starts one ordinary mission for the trainee. The owner must acknowledge the worst-case cost, which is shown beforehand."""
+    require_auth(request)
+    with db() as c:
+        row = c.execute("SELECT trainee_id,objectives_json FROM mentorships WHERE id=? AND status='active'", (mentorship_id,)).fetchone()
+        if not row: raise HTTPException(404, 'Active mentorship not found.')
+        if body.objective_index >= len(json.loads(row['objectives_json'])): raise HTTPException(400, 'Unknown objective.')
+        est = mentor_call(mentorship.mission_estimate, c, row['trainee_id'])
+    if est['max_usd'] is None: raise HTTPException(400, est['basis'])
+    try: accepted = Decimal(body.accept_max_usd)
+    except Exception: raise HTTPException(400, 'Enter the maximum cost you accept as a number.')
+    if accepted < Decimal(est['max_usd']): raise HTTPException(400, f"The worst-case cost is ${est['max_usd']}. Accept at least that amount to start the mission.")
+    created = await create_mission(MissionIn(title=body.title, instructions=body.instructions, bot_id=row['trainee_id']), request)
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        mentor_call(mentorship.link_training_mission, c, mentorship_id, created['id'], body.objective_index, est['max_usd'])
+    return {'id': created['id'], 'max_usd': est['max_usd']}
+
 
 
 # ---- Phase 5: career levels, reviews, promotions (owner-only; no model calls) ----
