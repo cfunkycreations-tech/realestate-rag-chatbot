@@ -44,7 +44,7 @@ export default function CouncilPanel({bots}:{bots:TeamBot[]}){
    <h2>New proposal</h2>
    <label htmlFor="fam-title">Title</label><input id="fam-title" required maxLength={160} value={form.title} onChange={e=>setForm({...form,title:e.target.value})}/>
    <label htmlFor="fam-kind">Type</label><select id="fam-kind" value={form.kind} onChange={e=>setForm({...form,kind:e.target.value})}>{data.kinds.map(k=><option key={k} value={k}>{KIND_LABEL(k)}{data.owner_only_kinds.includes(k)?' (you decide)':''}</option>)}</select>
-   <label htmlFor="fam-body">What should change, and why?</label><textarea id="fam-body" required maxLength={2000} rows={3} value={form.body} onChange={e=>setForm({...form,body:e.target.value})}/>
+   <label htmlFor="fam-prop-body">What should change, and why?</label><textarea id="fam-prop-body" required maxLength={2000} rows={3} value={form.body} onChange={e=>setForm({...form,body:e.target.value})}/>
    <button disabled={busy||!form.title.trim()||!form.body.trim()}>Add proposal</button>
   </form>
   <div className="fam-card"><h2>Meeting</h2>

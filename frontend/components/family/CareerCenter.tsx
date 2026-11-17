@@ -24,7 +24,7 @@ export default function CareerCenter({bots}:{bots:TeamBot[]}){
   Promise.all([api('/career/'+open),api('/bots/'+open+'/career').catch(()=>null)]).then(([p,c])=>{if(!live)return;setProfile(p);const list=c?.career?.skills||c?.career?.competencies||[];setSkills(Array.isArray(list)?list.filter((x:unknown)=>typeof x==='string').slice(0,12):[])}).catch(e=>{if(live)setError((e as Error).message)});
   return()=>{live=false};
  },[open,data]);
- async function act(fn:()=>Promise<unknown>,done:string){setBusy(true);setError('');setNotice('');try{await fn();setNotice(done);await load()}catch(e){setError((e as Error).message)}finally{setBusy(false)}}
+ async function act(fn:()=>Promise<unknown>,done:string){setBusy(true);setError('');setNotice('');try{const r=await fn();setNotice(typeof r==='string'?r:done);await load()}catch(e){setError((e as Error).message)}finally{setBusy(false)}}
  const byId=Object.fromEntries(bots.map(b=>[b.id,b]));
  const profile=open&&loaded&&loaded.bot_id===open?loaded:null;
  function choose(id:string){setOpen(id);setReview(null);setSkills([])}
@@ -33,7 +33,7 @@ export default function CareerCenter({bots}:{bots:TeamBot[]}){
   <p className="field-hint">{data.authority_note} “Completed” is a Bot’s own report that a mission finished; only work you mark verified counts as verified. Reviews and requirements are counted from records and cost nothing.</p>
   {error&&<p className="error" role="alert">{error}</p>}{notice&&<p className="notice" role="status">{notice}</p>}
   <ol className="fam-ladder" aria-label="Career levels">{LEVEL_ORDER.map(k=><li key={k}>{levelLabel(k)}<small>{data.bots.filter(b=>b.level===k).length}</small></li>)}</ol>
-  <div className="fam-actions"><button className="secondary" disabled={busy} onClick={()=>void act(async()=>{const r=await api('/career/reviews/run',send('POST'));setNotice(`${r.built} new review${r.built===1?'':'s'} built.`)},'Reviews are up to date.')}>Run this period’s reviews (free)</button></div>
+  <div className="fam-actions"><button className="secondary" disabled={busy} onClick={()=>void act(async()=>{const r=await api('/career/reviews/run',send('POST'));return `${r.built} new review${r.built===1?'':'s'} built.`},'Reviews are up to date.')}>Run this period’s reviews (free)</button></div>
   {todo.length>0&&<div className="fam-card"><h2>Check finished work ({todo.length})</h2><p className="field-hint">Tell us which completed missions were really good. This is the only way work becomes “verified”.</p>
    <ul className="fam-votes">{todo.slice(0,8).map(m=><li key={m.id}><strong>{m.title}</strong>{m.bots&&<small> by {m.bots}</small>} <button className="secondary" disabled={busy} onClick={()=>void act(()=>api(`/missions/${m.id}/verification`,send('PUT',{verdict:'verified',note:''})),'Marked verified.')}>Verified</button> <button className="secondary" disabled={busy} onClick={()=>void act(()=>api(`/missions/${m.id}/verification`,send('PUT',{verdict:'rejected',note:''})),'Marked not good enough.')}>Not good enough</button></li>)}</ul></div>}
   {data.bots.length===0&&<div className="mission-empty"><h2>No Bots yet</h2><p>Create a Bot and its career record starts here.</p></div>}
