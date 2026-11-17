@@ -41,7 +41,7 @@ from funkbot.memory_capture import save_learned, capture as capture_memory, norm
 from funkbot.skills import parse_invocation, parse_markdown
 from funkbot.schedule import next_occurrence
 from funkbot.backup import create as create_backup, restore as stage_restore, validate_stage, BackupError, MAX_TOTAL as MAX_BACKUP_TOTAL
-from funkbot import workspace_pointer, careers, economy, mission_control, botcomms
+from funkbot import workspace_pointer, careers, economy, mission_control, botcomms, progression
 from funkbot.tools import ALWAYS_REVIEWED
 from alembic.config import Config as AlembicConfig
 from alembic.script import ScriptDirectory
@@ -3143,6 +3143,170 @@ def revoke_comm_link(body: CommLinkIn, request: Request):
         c.execute('DELETE FROM comm_links WHERE from_bot_id=? AND to_bot_id=?',(body.from_bot_id,body.to_bot_id))
         append_event(c,body.from_bot_id,None,'comm.link_revoked',{'to_bot_id':body.to_bot_id})
     return {'ok':True}
+
+
+# ---- Phase 5: career levels, reviews, promotions (owner-only; no model calls) ----
+class VerifyIn(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    verdict: Literal['verified', 'rejected']
+    note: str = Field('', max_length=500)
+
+
+class ReviewIn(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    kind: Literal['periodic', 'mission'] = 'periodic'
+    key: str | None = Field(None, max_length=80)
+
+
+class OwnerFeedbackIn(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    rating: int = Field(ge=1, le=5)
+    comment: str = Field(min_length=1, max_length=500)
+
+
+class RecommendIn(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    to_level: Literal['junior', 'specialist', 'senior', 'lead', 'principal']
+    source: Literal['owner', 'system'] = 'system'
+    rationale: str = Field('', max_length=500)
+
+
+class DecisionIn(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    approve: bool
+    note: str = Field('', max_length=500)
+
+
+def career_call(fn, *args, **kwargs):
+    try:
+        return fn(*args, **kwargs)
+    except progression.ProgressionError as exc:
+        raise HTTPException(400, str(exc))
+
+
+@app.get('/api/career')
+def career_overview(request: Request):
+    require_auth(request)
+    with db() as c:
+        bots = c.execute('SELECT id FROM bots ORDER BY created_at,id').fetchall()
+        out = []
+        for b in bots:
+            s = progression.summary(c, b['id'])
+            out.append({'bot_id': s['bot_id'], 'name': s['name'], 'title': s['title'], 'level': s['level'], 'label': s['label'], 'since': s['since'], 'source': s['source'],
+                        'next': s['next'], 'eligible': s['eligibility']['eligible'], 'completed': s['metrics']['completed'], 'verified': s['metrics']['verified'],
+                        'reliability_percent': s['metrics']['reliability_percent'],
+                        'pending': next((r for r in s['recommendations'] if r['status'] == 'pending'), None)})
+        return {'bots': out, 'levels': [{'key': k, 'label': progression.LABELS[k]} for k in progression.LEVELS], 'rules': progression.RULES,
+                'authority_note': 'A level is a label. Promotion never changes tool permissions, spending limits or access to secrets.'}
+
+
+@app.get('/api/career/unverified')
+def career_unverified(request: Request, limit: int = 30):
+    """Completed missions the owner has not yet verified or rejected: the only source of 'verified' work."""
+    require_auth(request)
+    with db() as c:
+        rows = c.execute("""SELECT m.id,m.title,m.updated_at,(SELECT group_concat(b.name,', ') FROM mission_runs r JOIN bots b ON b.id=r.bot_id WHERE r.mission_id=m.id AND r.status='done') AS bots
+            FROM missions m WHERE m.status='done' AND NOT EXISTS (SELECT 1 FROM mission_verifications v WHERE v.mission_id=m.id)
+            ORDER BY m.updated_at DESC LIMIT ?""", (max(1, min(limit, 100)),)).fetchall()
+        return [dict(r) for r in rows]
+
+
+@app.get('/api/career/{bot_id}')
+def career_detail(bot_id: str, request: Request):
+    require_auth(request)
+    with db() as c:
+        if not c.execute('SELECT 1 FROM bots WHERE id=?', (bot_id,)).fetchone(): raise HTTPException(404, 'Bot not found.')
+        return progression.summary(c, bot_id)
+
+
+@app.put('/api/missions/{mission_id}/verification')
+def verify_mission(mission_id: str, body: VerifyIn, request: Request):
+    require_auth(request)
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        career_call(progression.set_verification, c, mission_id, body.verdict, body.note)
+    return {'ok': True}
+
+
+@app.delete('/api/missions/{mission_id}/verification')
+def clear_mission_verification(mission_id: str, request: Request):
+    require_auth(request)
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        c.execute('DELETE FROM mission_verifications WHERE mission_id=?', (mission_id,))
+    return {'ok': True}
+
+
+@app.post('/api/career/reviews/run')
+def career_run_reviews(request: Request):
+    """Builds this period's review for every Bot that has finished work. Free (no model) and idempotent."""
+    require_auth(request)
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        return {'built': progression.run_due_reviews(c)}
+
+
+@app.post('/api/career/{bot_id}/reviews')
+def career_create_review(bot_id: str, body: ReviewIn, request: Request):
+    require_auth(request)
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        if not c.execute('SELECT 1 FROM bots WHERE id=?', (bot_id,)).fetchone(): raise HTTPException(404, 'Bot not found.')
+        review = career_call(progression.build_review, c, bot_id, body.kind, body.key)
+        append_event(c, bot_id, None, 'career.review', {'summary': f"{body.kind.capitalize()} review for {review['period']}", 'ref_id': review['id']})
+        return review
+
+
+@app.get('/api/career/reviews/{review_id}')
+def career_get_review(review_id: str, request: Request):
+    require_auth(request)
+    with db() as c:
+        review = progression.get_review(c, review_id)
+        if not review: raise HTTPException(404, 'Review not found.')
+        return review
+
+
+@app.post('/api/career/reviews/{review_id}/feedback')
+def career_owner_feedback(review_id: str, body: OwnerFeedbackIn, request: Request):
+    require_auth(request)
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        career_call(progression.add_owner_feedback, c, review_id, body.rating, body.comment)
+    return {'ok': True}
+
+
+@app.post('/api/career/{bot_id}/recommendations')
+def career_recommend(bot_id: str, body: RecommendIn, request: Request):
+    """The owner (or the owner pressing 'check eligibility') records a recommendation. Nothing changes until it is approved."""
+    require_auth(request)
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        if not c.execute('SELECT 1 FROM bots WHERE id=?', (bot_id,)).fetchone(): raise HTTPException(404, 'Bot not found.')
+        rationale = body.rationale.strip() or ('Meets the evidence requirements for the next level.' if body.source == 'system' else '')
+        rid = career_call(progression.recommend, c, bot_id, body.to_level, body.source, rationale)
+        append_event(c, bot_id, None, 'career.promotion_recommended', {'summary': f'Recommended for {progression.LABELS[body.to_level]}', 'ref_id': rid})
+        return {'id': rid}
+
+
+@app.post('/api/career/recommendations/{rec_id}/decision')
+def career_decide(rec_id: str, body: DecisionIn, request: Request):
+    require_auth(request)
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        rec = c.execute('SELECT bot_id,to_level FROM promotion_recommendations WHERE id=?', (rec_id,)).fetchone()
+        career_call(progression.decide, c, rec_id, body.approve, body.note)
+        append_event(c, rec['bot_id'], None, 'career.promotion_decided', {'summary': ('Promoted to ' if body.approve else 'Declined promotion to ') + progression.LABELS[rec['to_level']], 'ref_id': rec_id})
+    return {'ok': True}
+
+
+@app.delete('/api/career/recommendations/{rec_id}')
+def career_withdraw(rec_id: str, request: Request):
+    require_auth(request)
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        career_call(progression.withdraw, c, rec_id)
+    return {'ok': True}
+
 
 
 @app.get('/api/settings/bot-comms')

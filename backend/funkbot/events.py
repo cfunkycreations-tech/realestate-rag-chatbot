@@ -89,7 +89,21 @@ class BotMessageReplyEvent(BaseModel):
     summary: str
 
 
+class OrgEvent(BaseModel):
+    summary: str = Field(max_length=300)
+    ref_id: str | None = None
+
 PAYLOAD_TYPES = {
+    'career.review': OrgEvent,
+    'career.promotion_recommended': OrgEvent,
+    'career.promotion_decided': OrgEvent,
+    'mentorship.started': OrgEvent,
+    'mentorship.ended': OrgEvent,
+    'council.proposal': OrgEvent,
+    'council.vote': OrgEvent,
+    'council.meeting': OrgEvent,
+    'council.decision': OrgEvent,
+
     'bot_message.sent': BotMessageEvent,
     'bot_message.refused': BotMessageEvent,
     'bot_message.reply': BotMessageReplyEvent,
@@ -119,7 +133,7 @@ class EventOut(BaseModel):
     id: int
     bot_id: str | None
     run_id: str | None
-    type: Literal['bot_message.sent', 'bot_message.refused', 'bot_message.reply', 'comm.link_approved', 'comm.link_revoked', 'delegation.pair_approved', 'delegation.pair_revoked', 'computer.domains_changed', 'computer.takeover', 'computer.owner_input', 'computer.permission_changed', 'bot_dm.message', 'handoff.created', 'run.started', 'run.finished', 'bot.state_changed', 'message.sent', 'error.raised', 'group.session_started', 'group.session_ended', 'group.delegated', 'group.replied']
+    type: Literal['bot_message.sent', 'bot_message.refused', 'bot_message.reply', 'comm.link_approved', 'comm.link_revoked', 'career.review', 'career.promotion_recommended', 'career.promotion_decided', 'mentorship.started', 'mentorship.ended', 'council.proposal', 'council.vote', 'council.meeting', 'council.decision', 'delegation.pair_approved', 'delegation.pair_revoked', 'computer.domains_changed', 'computer.takeover', 'computer.owner_input', 'computer.permission_changed', 'bot_dm.message', 'handoff.created', 'run.started', 'run.finished', 'bot.state_changed', 'message.sent', 'error.raised', 'group.session_started', 'group.session_ended', 'group.delegated', 'group.replied']
     payload: dict
     created_at: float
 
