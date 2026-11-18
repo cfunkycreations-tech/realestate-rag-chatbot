@@ -255,6 +255,37 @@ def install_career(c, bot_id, preset, *, birth_mode, now=None):
               (bot_id, 'born', json.dumps({'preset_id': preset['id'], 'preset_version': preset['version'], 'birth_mode': birth_mode, 'level': preset['level']}), now))
 
 
+KEEPS = ['Name', 'Job title', 'Personality and instructions', 'Memory and chats', 'Skills', 'Vault sprite', 'Budget limits', 'Tool permissions']
+
+
+def preview_attach(c, bot_id, preset_id):
+    """What adding a career to an existing Bot would change, and what it never touches."""
+    bot = c.execute('SELECT id,name,title FROM bots WHERE id=?', (bot_id,)).fetchone()
+    if bot is None:
+        raise PresetError('Bot not found.')
+    if c.execute('SELECT 1 FROM bot_careers WHERE bot_id=?', (bot_id,)).fetchone():
+        raise PresetError(f'{bot["name"]} already has a career.')
+    preset = get_preset(c, preset_id)
+    if not preset or preset['status'] != 'active':
+        raise PresetError('Role preset not found or not active.')
+    return {'bot_id': bot_id, 'name': bot['name'], 'title': bot['title'], 'preset_id': preset['id'], 'preset_title': preset['title'],
+            'adds': {'level': preset['level'], 'department': preset['department'], 'model_tier': preset['model_tier']},
+            'keeps': KEEPS,
+            'note': 'The career is recorded beside the Bot. Its name, job title, personality, memory, skills and sprite are not changed, and no permission or spending limit changes.'}
+
+
+def attach_career(c, bot_id, preset_id, now=None):
+    """Record a career beside an existing Bot. Never rewrites the Bot row (name, title, personality stay)."""
+    now = now or time.time()
+    preview_attach(c, bot_id, preset_id)
+    preset = get_preset(c, preset_id)
+    c.execute('INSERT INTO bot_careers VALUES (?,?,?,?,?,?,?,?,?)',
+              (bot_id, preset['id'], preset['version'], json.dumps({k: v for k, v in preset.items() if k not in ('status', 'customized')}),
+               preset['level'], preset['department'], preset['model_tier'], None, now))
+    c.execute('INSERT INTO career_history(bot_id,event,detail,created_at) VALUES (?,?,?,?)',
+              (bot_id, 'attached', json.dumps({'preset_id': preset['id'], 'preset_version': preset['version'], 'level': preset['level'], 'existing_bot': True}), now))
+
+
 def copy_career(c, source_id, new_id, now=None):
     """A duplicated Bot keeps the Career DNA its copied instructions came from. No-op for hand-made Bots."""
     now = now or time.time()

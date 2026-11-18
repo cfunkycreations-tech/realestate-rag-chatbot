@@ -3719,6 +3719,47 @@ def career_unverified(request: Request, limit: int = 30):
         return [dict(r) for r in rows]
 
 
+@app.get('/api/career/unassigned')
+def career_unassigned(request: Request):
+    """Bots created before Employee DNA, plus the active presets they could be given."""
+    require_auth(request)
+    with db() as c:
+        bots = c.execute('SELECT id,name,title FROM bots WHERE id NOT IN (SELECT bot_id FROM bot_careers) ORDER BY created_at,id').fetchall()
+        presets = c.execute("SELECT id FROM role_presets WHERE status='active' ORDER BY id").fetchall()
+        return {'bots': [dict(b) for b in bots],
+                'presets': [{k: p[k] for k in ('id', 'title', 'department', 'level', 'model_tier')} for p in (careers.get_preset(c, r['id']) for r in presets)]}
+
+
+class AttachItem(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    bot_id: str = Field(min_length=1, max_length=128)
+    preset_id: str = Field(min_length=1, max_length=128)
+
+
+class AttachIn(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    assignments: list[AttachItem] = Field(min_length=1, max_length=60)
+    confirm: bool = Field(default=False, strict=True)
+
+
+@app.post('/api/career/attach')
+def career_attach(body: AttachIn, request: Request):
+    """Preview (confirm false) or apply (confirm true) careers for existing Bots. Applying is all-or-nothing and writes an audit row per Bot."""
+    require_auth(request)
+    if len({a.bot_id for a in body.assignments}) != len(body.assignments):
+        raise HTTPException(400, 'Each Bot can appear once.')
+    try:
+        with db() as c:
+            c.execute('BEGIN IMMEDIATE')
+            previews = [careers.preview_attach(c, a.bot_id, a.preset_id) for a in body.assignments]
+            if body.confirm:
+                for a in body.assignments:
+                    careers.attach_career(c, a.bot_id, a.preset_id)
+    except careers.PresetError as exc:
+        raise HTTPException(400, str(exc))
+    return {'applied': body.confirm, 'count': len(previews), 'previews': previews}
+
+
 @app.get('/api/career/{bot_id}')
 def career_detail(bot_id: str, request: Request):
     require_auth(request)

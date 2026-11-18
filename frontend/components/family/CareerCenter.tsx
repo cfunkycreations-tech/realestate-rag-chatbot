@@ -2,6 +2,7 @@
 import {useCallback,useEffect,useState} from 'react';
 import {api,send} from './api';
 import {LEVEL_ORDER,criterionText,eligibilityText,levelLabel,percent,statusLabel,type Eligibility} from './model';
+import AttachCareers from './AttachCareers';
 import type {TeamBot} from '../team/TeamDashboard';
 
 type Row={bot_id:string;name:string;title:string;level:string;label:string;source:string;next:string|null;eligible:boolean;completed:number;verified:number;reliability_percent:number|null;pending:{id:string;to_level:string;source:string;rationale:string}|null};
@@ -37,6 +38,7 @@ export default function CareerCenter({bots}:{bots:TeamBot[]}){
   {todo.length>0&&<div className="fam-card"><h2>Check finished work ({todo.length})</h2><p className="field-hint">Tell us which completed missions were really good. This is the only way work becomes “verified”.</p>
    <ul className="fam-votes">{todo.slice(0,8).map(m=><li key={m.id}><strong>{m.title}</strong>{m.bots&&<small> by {m.bots}</small>} <button className="secondary" disabled={busy} onClick={()=>void act(()=>api(`/missions/${m.id}/verification`,send('PUT',{verdict:'verified',note:''})),'Marked verified.')}>Verified</button> <button className="secondary" disabled={busy} onClick={()=>void act(()=>api(`/missions/${m.id}/verification`,send('PUT',{verdict:'rejected',note:''})),'Marked not good enough.')}>Not good enough</button></li>)}</ul></div>}
   {data.bots.length===0&&<div className="mission-empty"><h2>No Bots yet</h2><p>Create a Bot and its career record starts here.</p></div>}
+  <AttachCareers onDone={()=>void load()}/>
   <div className="fam-grid">{data.bots.map(b=><article key={b.bot_id} className={`fam-card${open===b.bot_id?' open':''}`} aria-label={b.name}>
    <button type="button" className="bc-head" aria-expanded={open===b.bot_id} onClick={()=>choose(open===b.bot_id?'':b.bot_id)}><span className="bc-route"><strong>{b.name}</strong> <small>{byId[b.bot_id]?.title||b.title}</small></span><span className="mission-status done">{b.label}</span></button>
    <dl className="bc-facts"><div><dt>Completed</dt><dd>{b.completed}</dd></div><div><dt>Verified by you</dt><dd>{b.verified}</dd></div><div><dt>Reliability</dt><dd>{percent(b.reliability_percent)}</dd></div></dl>

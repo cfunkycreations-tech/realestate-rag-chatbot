@@ -4,7 +4,7 @@ Branch: `feature/employee-dna`. Nothing here is merged or deployed.
 
 ## Unfinished work (recorded on purpose)
 
-### Phase 2 — existing-Bot career migration (NOT DONE)
+### Phase 2 — existing-Bot career migration (BUILT: Family > Career Center > "Bots without a career")
 Bots created before Employee DNA have no career. Needed:
 - An owner-approved way to assign a role preset to an existing Bot.
 - It must never overwrite the Bot's name, personality, memory, skills or Vault
