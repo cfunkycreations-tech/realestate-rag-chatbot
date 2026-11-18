@@ -41,7 +41,7 @@ from funkbot.memory_capture import save_learned, capture as capture_memory, norm
 from funkbot.skills import parse_invocation, parse_markdown
 from funkbot.schedule import next_occurrence
 from funkbot.backup import create as create_backup, restore as stage_restore, validate_stage, BackupError, MAX_TOTAL as MAX_BACKUP_TOTAL
-from funkbot import workspace_pointer, careers, economy, mission_control, botcomms, progression, mentorship, council, automation, evaluations
+from funkbot import workspace_pointer, careers, economy, mission_control, botcomms, progression, mentorship, council, automation, evaluations, cockpit
 from funkbot.tools import ALWAYS_REVIEWED
 from alembic.config import Config as AlembicConfig
 from alembic.script import ScriptDirectory
@@ -5167,6 +5167,20 @@ def team_overview(request: Request, day_start: float = Query(ge=0), bot_id: str 
         events.append(event)
     return {'bots':count,'runs_today':runs,'last_activity':last,'events':events,
             'states':{r['bot_id']:json.loads(r['payload'])['state'] for r in states if r['bot_id']}}
+
+
+@app.get('/api/cockpit/workforce')
+def cockpit_workforce(request: Request):
+    require_auth(request)
+    with db() as c:
+        return cockpit.workforce(c)
+
+
+@app.get('/api/cockpit/sources')
+def cockpit_sources(request: Request):
+    require_auth(request)
+    with db() as c:
+        return cockpit.sources(c)
 
 
 @app.get('/api/mission-control')
