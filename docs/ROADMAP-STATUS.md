@@ -1,6 +1,6 @@
 # Funk Bot AI Family — status and unfinished work
 
-Branch: `feature/employee-dna`. Nothing here is merged or deployed.
+Work branch: `feature/playbooks` (stacked on feature/family-council, feature/bot-comms and feature/employee-dna). Nothing here is merged to `main`.
 
 ## Unfinished work (recorded on purpose)
 
@@ -42,3 +42,13 @@ wiring the Phase 4 `nominate_colleague` / `request_mentorship` kinds to recommen
 - Vitest: 40 passed. tsc and eslint clean.
 - Family browser e2e: passed on the third run; the first two caught a notice-overwrite bug and a duplicate element id, both fixed (de537df).
 - Status: governance core built and tested. Autonomous triggers (scheduled/event meetings, Bot-authored proposals and feedback, mentor-proposed training, automatic mission reviews and system recommendations) are NOT built.
+
+## Phase 6 — evaluations and certifications (BUILT, `docs/phase-6-8.md`)
+Family > Evaluations. Five versioned, deterministic, zero-cost suites scored from recorded work; certification labels derived only from counted results; every instruction edit keeps the old text and can be restored.
+Not built: model-based evaluations (they would cost money and are intentionally absent), authoring custom tests, automatic improvement proposals (the result states a likely cause; changing instructions stays an owner action).
+
+## Phase 7 — Mission Control and Cockpit (BUILT, `docs/phase-6-8.md`)
+The banner gauges already existed (Employee availability, Mission completion, Workflow health, Spend, Activity, Attention) and were audited against the directive. New: a Cockpit view with three modes. AI Workforce is real data. Lyricist Pro and Business Operations show an honest not-connected state; connecting a GitHub/Gumroad connector marks them connected but live figures are NOT pulled in yet.
+
+## Phase 8 — verification and hardening
+See `docs/phase-6-8.md` for test results and what was and was not verified.
