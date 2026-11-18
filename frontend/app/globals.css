@@ -516,3 +516,4 @@ input[type=file]::file-selector-button:hover{box-shadow:0 0 12px color-mix(in sr
 button.ck-tile:hover,button.ck-tile:focus-visible{border-color:var(--edge-bright)}
 .ck-tile.tone-ok{border-color:rgba(60,220,140,.5)}.ck-tile.tone-warn{border-color:rgba(255,190,70,.6)}.ck-tile.tone-bad{border-color:rgba(255,110,110,.7)}
 .ck-wide{grid-column:1/-1}
+.chat-header{position:relative;z-index:30}.menu-wrap{z-index:31}.dropdown{z-index:60;top:40px}.chat-header .dropdown{background:#050a07;opacity:1}
