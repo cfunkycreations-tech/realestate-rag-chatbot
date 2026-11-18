@@ -1,4 +1,5 @@
 'use client';
+import ModelPin from '../components/ModelPin';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import Image from 'next/image';
@@ -94,6 +95,7 @@ function BotEditor({bot,onClose,onSaved}:{bot?:Bot;onClose:()=>void;onSaved:(id:
     <div className="editor-grid"><div><label htmlFor="name">{bot?'Name':'Fallback name if Vault is empty'}</label><input id="name" required maxLength={120} value={form.name} onChange={e=>update('name',e.target.value)} placeholder="e.g. Scout"/></div><div><label htmlFor="title">Job title (or custom job)</label><input id="title" required maxLength={100} value={form.title} onChange={e=>update('title',e.target.value)} placeholder="e.g. Research partner"/></div></div>
     <label htmlFor="personality">Personality & instructions</label><textarea id="personality" rows={3} value={form.personality} onChange={e=>update('personality',e.target.value)} placeholder="How should this Bot approach its work?"/>
     <div className="editor-grid editor-bottom"><div><label>Appearance</label><div className="appearance"><Avatar bot={{...form,name:form.name||'Bot'}}/><div className="color-list">{colors.map(c=><button type="button" aria-label={c} key={c} className={`swatch ${c} ${form.color===c?'active':''}`} onClick={()=>update('color',c)}>{form.color===c&&<Check size={13}/>}</button>)}</div></div><div className="shape-list">{['round','square','cloud'].map(s=><button type="button" key={s} className={form.shape===s?'selected':''} onClick={()=>update('shape',s)}>{s}</button>)}</div></div><div><label htmlFor="profile">Default model profile</label><select id="profile" value={form.profile} onChange={e=>update('profile',e.target.value)}>{['smart','fast','thinker','vision','cheap-bulk'].map(p=><option key={p}>{p}</option>)}</select><p className="field-hint">Profiles can be configured in Settings.</p></div></div>
+    {bot&&<ModelPin botId={bot.id}/>}
     {error&&<div className="error">{error}</div>}<div className="modal-actions"><button type="button" className="secondary" onClick={onClose}>Cancel</button><button className="primary" disabled={busy}>{busy?'Saving…':bot?'Save changes':'Create Bot'} <ArrowRight size={15}/></button></div></form>}</Modal>
 }
 function SpritePicker({bot,onClose,onSaved}:{bot:Bot;onClose:()=>void;onSaved:(character:Character)=>void}){

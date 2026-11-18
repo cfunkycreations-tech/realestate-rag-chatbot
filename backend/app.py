@@ -693,6 +693,37 @@ def update_bot(bot_id: str, body: BotIn, request: Request):
         if not cur.rowcount: raise HTTPException(404,'Bot not found.')
     return {'ok':True}
 
+class ModelPinIn(BaseModel):
+    gateway: str = Field(pattern='^(omniroute|openrouter|custom)$')
+    model: str = Field(min_length=1, max_length=200)
+
+
+@app.get('/api/bots/{bot_id}/model-pin')
+def get_model_pin(bot_id: str, request: Request):
+    require_auth(request)
+    with db() as c:
+        if not c.execute('SELECT 1 FROM bots WHERE id=?',(bot_id,)).fetchone(): raise HTTPException(404,'Bot not found.')
+        row=c.execute('SELECT gateway,model FROM bot_model_pins WHERE bot_id=?',(bot_id,)).fetchone()
+        return {'pin': {'gateway':row['gateway'],'model':row['model']} if row else None}
+
+
+@app.put('/api/bots/{bot_id}/model-pin')
+def set_model_pin(bot_id: str, body: ModelPinIn, request: Request):
+    require_auth(request)
+    with db() as c:
+        if not c.execute('SELECT 1 FROM bots WHERE id=?',(bot_id,)).fetchone(): raise HTTPException(404,'Bot not found.')
+        c.execute('INSERT OR REPLACE INTO bot_model_pins VALUES (?,?,?,?)',(bot_id,body.gateway,body.model.strip(),time.time()))
+    return {'ok':True}
+
+
+@app.delete('/api/bots/{bot_id}/model-pin')
+def clear_model_pin(bot_id: str, request: Request):
+    require_auth(request)
+    with db() as c:
+        c.execute('DELETE FROM bot_model_pins WHERE bot_id=?',(bot_id,))
+    return {'ok':True}
+
+
 @app.delete('/api/bots/{bot_id}')
 def delete_bot(bot_id: str, request: Request):
     require_auth(request)
@@ -2026,7 +2057,7 @@ async def start_chat(bot_id: str, body: ChatIn, mission_id: str | None = None, g
         requested_profile=body.profile or bot['profile']
         delegation=economy.delegation_for(c,mission_id,dm_turn_id)
         # Lab runs compare profiles on purpose: never relabel them.
-        chosen_profile,career_tier,adjustment=(requested_profile,None,None) if lab_step_id else economy.choose_profile(c,bot,requested_profile,bool(body.profile),delegation)
+        chosen_profile,career_tier,adjustment=(requested_profile,None,None) if lab_step_id else economy.choose_profile(c,bot,requested_profile,bool(body.profile) or bool(c.execute('SELECT 1 FROM bot_model_pins WHERE bot_id=?',(bot_id,)).fetchone()),delegation)
         economy_on=economy.settings(c)['economy']['enabled']
         bot['computer_desktop']=bot['computer_enabled'] and computer.desktop_enabled() and chosen_profile=='vision'
         bot['connector_catalog']=[] if (lab_step_id or internal_draft) else [{'id':x['id'],'name':redact_text(x['name'],keys),'tools':[redact_text(t,keys) for t in x['tools']]} for x in connector_catalog(c)]
@@ -2037,6 +2068,9 @@ async def start_chat(bot_id: str, body: ChatIn, mission_id: str | None = None, g
         now=time.time()
         profile_table=json.loads(c.execute('SELECT value FROM config WHERE key=?', ('profiles',)).fetchone()['value'])
         entries=economy.order_entries(c,profile_table.get(chosen_profile,[]),economy_on)
+        # Owner-pinned model: used only while nothing lowered the profile. The Economy ceiling, delegation bound and budget caps still win.
+        pin=c.execute('SELECT gateway,model FROM bot_model_pins WHERE bot_id=?',(bot_id,)).fetchone()
+        if pin and not lab_step_id and chosen_profile==requested_profile: entries=[{'gateway':pin['gateway'],'model':pin['model']}]
         chat_id=None
         if not lab_step_id and not internal_draft and not group_turn_id and not dm_turn_id:
             chat_id=body.chat_id or default_chat(c,bot_id)

@@ -21,7 +21,7 @@ def test_workflow_migration_preserves_existing_project_files(tmp_path):
         c.exec_driver_sql("INSERT INTO projects VALUES ('p','Project','keep','b',1,1)")
         c.exec_driver_sql("INSERT INTO work_artifacts VALUES ('a',NULL,'p',NULL,NULL,'data.txt',X'6869',1)");c.commit()
         command.upgrade(cfg,'head');c.commit()
-        assert c.exec_driver_sql('SELECT version_num FROM alembic_version').scalar()=='0036_evaluations'
+        assert c.exec_driver_sql('SELECT version_num FROM alembic_version').scalar()=='0037_model_pin'
         assert c.exec_driver_sql("SELECT data FROM work_artifacts WHERE id='a'").scalar()==b'hi'
         assert c.exec_driver_sql("SELECT name FROM bots WHERE id='b'").scalar()=='Kept'
         assert c.exec_driver_sql('SELECT COUNT(*) FROM workflow_versions').scalar()==0
