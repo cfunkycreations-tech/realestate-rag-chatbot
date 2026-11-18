@@ -81,7 +81,7 @@ def test_upgrade_from_group_chats_preserves_existing_content(tmp_path):
         c.exec_driver_sql("INSERT INTO bots (id,name,title,personality,color,shape,profile,created_at) VALUES ('legacy','Old Bot','Editor','Helpful','mint','round','smart',1)")
         c.exec_driver_sql("INSERT INTO projects VALUES ('p','Existing project','Keep me','legacy',1,1)");c.commit()
         command.upgrade(cfg,'head');c.commit()
-        assert c.exec_driver_sql('SELECT version_num FROM alembic_version').scalar()=='0035_family_automation'
+        assert c.exec_driver_sql('SELECT version_num FROM alembic_version').scalar()=='0036_evaluations'
         assert c.exec_driver_sql("SELECT name FROM bots WHERE id='legacy'").scalar()=='Old Bot'
         assert c.exec_driver_sql("SELECT description FROM projects WHERE id='p'").scalar()=='Keep me'
         assert c.exec_driver_sql('SELECT COUNT(*) FROM work_artifacts').scalar()==0

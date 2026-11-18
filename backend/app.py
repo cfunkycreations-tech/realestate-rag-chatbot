@@ -41,7 +41,7 @@ from funkbot.memory_capture import save_learned, capture as capture_memory, norm
 from funkbot.skills import parse_invocation, parse_markdown
 from funkbot.schedule import next_occurrence
 from funkbot.backup import create as create_backup, restore as stage_restore, validate_stage, BackupError, MAX_TOTAL as MAX_BACKUP_TOTAL
-from funkbot import workspace_pointer, careers, economy, mission_control, botcomms, progression, mentorship, council, automation
+from funkbot import workspace_pointer, careers, economy, mission_control, botcomms, progression, mentorship, council, automation, evaluations
 from funkbot.tools import ALWAYS_REVIEWED
 from alembic.config import Config as AlembicConfig
 from alembic.script import ScriptDirectory
@@ -619,10 +619,76 @@ def give_sprite(bot_id: str, body: SpriteChoice, request: Request):
     return {'character':character}
 
 
+class EvalRunIn(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    bot_ids: list[str] | None = Field(default=None, max_length=100)
+    suites: list[str] | None = Field(default=None, max_length=10)
+
+
+class RollbackIn(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    version_id: str = Field(min_length=1, max_length=128)
+
+
+@app.get('/api/evaluations')
+def evaluations_overview(request: Request):
+    require_auth(request)
+    with db() as c:
+        return {'bots': evaluations.overview(c), 'suites': [{'suite': k, **v} for k, v in evaluations.SUITES.items()],
+                'labels': [{'key': k, 'label': evaluations.LABELS[k]} for k in evaluations.LEVELS],
+                'note': 'Scored from recorded work at no cost. A certification is a label; it changes no permission or spending limit.'}
+
+
+@app.post('/api/evaluations/run')
+def evaluations_run(body: EvalRunIn, request: Request):
+    """Zero-cost deterministic evaluation. Runs for the named Bots, or for every Bot when none are named."""
+    require_auth(request)
+    try:
+        with db() as c:
+            c.execute('BEGIN IMMEDIATE')
+            ids = body.bot_ids if body.bot_ids is not None else [r['id'] for r in c.execute('SELECT id FROM bots ORDER BY created_at,id').fetchall()]
+            return {'runs': [evaluations.run(c, i, body.suites) for i in ids]}
+    except evaluations.EvalError as exc:
+        raise HTTPException(400, str(exc))
+
+
+@app.get('/api/evaluations/{bot_id}')
+def evaluations_report(bot_id: str, request: Request):
+    require_auth(request)
+    try:
+        with db() as c:
+            return evaluations.report(c, bot_id)
+    except evaluations.EvalError as exc:
+        raise HTTPException(404, str(exc))
+
+
+@app.get('/api/bots/{bot_id}/instructions')
+def instruction_versions(bot_id: str, request: Request):
+    require_auth(request)
+    try:
+        with db() as c:
+            return {'versions': evaluations.versions(c, bot_id)}
+    except evaluations.EvalError as exc:
+        raise HTTPException(404, str(exc))
+
+
+@app.post('/api/bots/{bot_id}/instructions/rollback')
+def instruction_rollback(bot_id: str, body: RollbackIn, request: Request):
+    require_auth(request)
+    try:
+        with db() as c:
+            c.execute('BEGIN IMMEDIATE')
+            return evaluations.rollback(c, bot_id, body.version_id)
+    except evaluations.EvalError as exc:
+        raise HTTPException(404, str(exc))
+
+
 @app.put('/api/bots/{bot_id}')
 def update_bot(bot_id: str, body: BotIn, request: Request):
     require_auth(request)
     with db() as c:
+        old=c.execute('SELECT personality FROM bots WHERE id=?',(bot_id,)).fetchone()
+        if old and old['personality']!=redact(body.personality): evaluations.snapshot(c,bot_id,'editor','Saved automatically before the instructions were edited.')
         cur=c.execute('UPDATE bots SET name=?, title=?, personality=?, color=?, shape=?, profile=? WHERE id=?',(redact(body.name.strip()),redact(body.title.strip()),redact(body.personality),body.color,body.shape,body.profile,bot_id))
         if not cur.rowcount: raise HTTPException(404,'Bot not found.')
     return {'ok':True}
@@ -4096,6 +4162,7 @@ def apply_lab_prompt(experiment_id: str, request: Request):
         c.execute('BEGIN IMMEDIATE')
         row=c.execute("SELECT * FROM lab_experiments WHERE id=? AND status='done'",(experiment_id,)).fetchone()
         if not row: raise HTTPException(409,'Only a completed experiment can save its tested prompt.')
+        if row['bot_id']: evaluations.snapshot(c,row['bot_id'],'lab','Saved automatically before a Lab prompt was applied.')
         if not row['bot_id'] or not c.execute('UPDATE bots SET personality=? WHERE id=?',(row['system_prompt'],row['bot_id'])).rowcount: raise HTTPException(404,'Bot not found.')
     return {'ok':True}
 
