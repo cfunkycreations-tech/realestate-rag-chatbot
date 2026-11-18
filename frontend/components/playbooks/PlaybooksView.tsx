@@ -14,11 +14,11 @@ async function call(path:string,init?:RequestInit){
 
 // "What you get" pages. The stage is SAMPLE OUTPUT. The Bot shown is yours; "Set up" only creates a PAUSED routine you review first.
 export default function PlaybooksView({bots,onHire,onRoutines}:{bots:TeamBot[];onHire:()=>void;onRoutines:()=>void}){
- const [index,setIndex]=useState(0),[tick,setTick]=useState(0),[playing,setPlaying]=useState(true),[assign,setAssign]=useState<Record<string,string>>({}),[error,setError]=useState(''),[notice,setNotice]=useState(''),[busy,setBusy]=useState(false);
+ const [index,setIndex]=useState(0),[tick,setTick]=useState(0),[playing,setPlaying]=useState(false),[assign,setAssign]=useState<Record<string,string>>({}),[error,setError]=useState(''),[notice,setNotice]=useState(''),[busy,setBusy]=useState(false);
  const [reduced,setReduced]=useState(false),lock=useRef(false);
  const p=PLAYBOOKS[index],Stage=STAGES[p.id];
- useEffect(()=>{const q=window.matchMedia('(prefers-reduced-motion: reduce)');const sync=()=>setReduced(q.matches);sync();q.addEventListener('change',sync);return()=>q.removeEventListener('change',sync)},[]);
- useEffect(()=>{if(!playing||reduced)return;const t=window.setInterval(()=>setTick(n=>n+1),2400);return()=>window.clearInterval(t)},[playing,reduced]);
+ useEffect(()=>{const q=window.matchMedia('(prefers-reduced-motion: reduce)');const sync=()=>setReduced(q.matches);sync();if(q.matches===false)setPlaying(true);q.addEventListener('change',sync);return()=>q.removeEventListener('change',sync)},[]);
+ useEffect(()=>{if(!playing)return;const t=window.setInterval(()=>setTick(n=>n+1),reduced?3600:2400);return()=>window.clearInterval(t)},[playing,reduced]);
  useEffect(()=>{let live=true;call('/playbooks/assignments').then(d=>{if(live)setAssign(d.assignments)}).catch(e=>{if(live)setError((e as Error).message)});return()=>{live=false}},[]);
  const bot=useMemo(()=>bots.find(b=>b.id===assign[p.id])||null,[bots,assign,p.id]);
  const step=tick%8;
@@ -40,7 +40,7 @@ export default function PlaybooksView({bots,onHire,onRoutines}:{bots:TeamBot[];o
    <h1 className="pb-title">{a}<em>{b}</em>{c}</h1>
    <p className="pb-sub">{s1}<strong>{s2}</strong>{s3}</p>
    <div className="pb-stage" aria-label="Sample output (illustration)"><Stage f={tick} pill={p.pill}/></div>
-   <div className="pb-steps" role="list" aria-label="How it works, 8 steps"><div className="pb-steps-head"><small>HOW IT WORKS</small><b>8 steps</b><button type="button" className="pb-play" aria-pressed={!playing} onClick={()=>setPlaying(v=>!v)} disabled={reduced}>{playing&&!reduced?'Pause':'Play'}</button></div>{p.steps.map((s,i)=><button key={s.name} type="button" role="listitem" className={`pb-step${i===step?' on':''}`} aria-current={i===step?'step':undefined} onClick={()=>{setPlaying(false);setTick(i)}}><small>{String(i+1).padStart(2,'0')}</small><b>{s.name}</b><span>{s.hint}</span></button>)}</div>
+   <div className="pb-steps" role="list" aria-label="How it works, 8 steps"><div className="pb-steps-head"><small>HOW IT WORKS</small><b>8 steps</b><button type="button" className="pb-play" aria-pressed={!playing} onClick={()=>setPlaying(v=>!v)}>{playing?'Pause':'Play'}</button></div>{p.steps.map((s,i)=><button key={s.name} type="button" role="listitem" className={`pb-step${i===step?' on':''}`} aria-current={i===step?'step':undefined} onClick={()=>{setPlaying(false);setTick(i)}}><small>{String(i+1).padStart(2,'0')}</small><b>{s.name}</b><span>{s.hint}</span></button>)}</div>
    <dl className="pb-facts"><div><dt>RUNS</dt><dd>{p.runs}</dd></div><div><dt>REPLACES</dt><dd>{p.replaces}</dd></div><div><dt>NEVER</dt><dd>{p.never}</dd></div><div className="pb-accent-cell"><dt>{p.ruleLabel}</dt><dd>{p.rule}</dd></div></dl>
    <section className="pb-use" aria-label="Use this playbook">
     <p className={`pb-reality ${p.reality.ready?'ready':'needs'}`}><strong>{p.reality.ready?'Works today.':'Needs a source.'}</strong> {p.reality.text}</p>
