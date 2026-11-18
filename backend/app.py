@@ -632,6 +632,29 @@ def delete_bot(bot_id: str, request: Request):
     require_auth(request)
     with db() as c:
         c.execute('BEGIN IMMEDIATE')
+        remove_bot(c,bot_id)
+    return {'ok':True}
+
+
+class BulkConfirm(BaseModel):
+    model_config=ConfigDict(extra='forbid')
+    confirm: str
+
+
+@app.post('/api/bots/delete-all')
+def delete_all_bots(body: BulkConfirm, request: Request):
+    require_auth(request)
+    if body.confirm!='DELETE ALL': raise HTTPException(400,'Type DELETE ALL to confirm.')
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        ids=[r['id'] for r in c.execute('SELECT id FROM bots ORDER BY id').fetchall()]
+        # One transaction: any busy Bot (409) rolls everything back, so it is all or nothing.
+        for bot_id in ids: remove_bot(c,bot_id)
+    return {'deleted':len(ids)}
+
+
+def remove_bot(c,bot_id):
+    if True:
         if c.execute("SELECT 1 FROM runs WHERE bot_id=? AND status IN ('queued','running','waiting_approval')", (bot_id,)).fetchone(): raise HTTPException(409, 'Wait for the current response before deleting this Bot.')
         if c.execute("SELECT 1 FROM group_chat_turns t JOIN group_chats gc ON gc.id=t.chat_id JOIN bot_group_members gm ON gm.group_id=gc.group_id WHERE gm.bot_id=? AND t.status IN ('queued','running')",(bot_id,)).fetchone(): raise HTTPException(409,'Stop the active group chat before deleting this Bot.')
         if c.execute("SELECT 1 FROM bot_dm_turns t JOIN bot_dms d ON d.id=t.dm_id WHERE (d.sender_id=? OR d.receiver_id=?) AND t.status IN ('queued','running')",(bot_id,bot_id)).fetchone(): raise HTTPException(409,'Stop the active Bot DM before deleting this Bot.')
@@ -646,7 +669,6 @@ def delete_bot(bot_id: str, request: Request):
         if not c.execute('DELETE FROM bots WHERE id=?',(bot_id,)).rowcount: raise HTTPException(404,'Bot not found.')
         if assignment and not c.execute('SELECT 1 FROM bot_characters WHERE character_id=?',(assignment['character_id'],)).fetchone():
             c.execute('UPDATE characters SET drawn=0 WHERE id=?',(assignment['character_id'],))
-    return {'ok':True}
 
 def computer_bot_exists(c,bot_id):
     if not c.execute('SELECT 1 FROM bots WHERE id=?',(bot_id,)).fetchone(): raise HTTPException(404,'Bot not found.')
@@ -849,6 +871,22 @@ def vault_remove_pack(pack_id: str, request: Request):
             c.execute('DELETE FROM characters WHERE id=?',(character_id,))
         c.execute('DELETE FROM pack_characters WHERE pack_id=?',(pack_id,))
         c.execute('DELETE FROM character_packs WHERE id=?',(pack_id,))
+    for character_id in doomed:
+        (DATA / 'vault' / (character_id + '.png')).unlink(missing_ok=True)
+    return {'removed':len(doomed),'kept_in_use':kept}
+
+@app.post('/api/vault/purge')
+def vault_purge(body: BulkConfirm, request: Request):
+    require_auth(request)
+    if body.confirm!='PURGE': raise HTTPException(400,'Type PURGE to confirm.')
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        doomed=[r['id'] for r in c.execute('SELECT id FROM characters WHERE id NOT IN (SELECT character_id FROM bot_characters)').fetchall()]
+        kept=c.execute('SELECT count(*) FROM bot_characters').fetchone()[0]
+        for character_id in doomed:
+            c.execute('DELETE FROM pack_characters WHERE character_id=?',(character_id,))
+            c.execute('DELETE FROM characters WHERE id=?',(character_id,))
+        c.execute('DELETE FROM character_packs WHERE id NOT IN (SELECT pack_id FROM pack_characters)')
     for character_id in doomed:
         (DATA / 'vault' / (character_id + '.png')).unlink(missing_ok=True)
     return {'removed':len(doomed),'kept_in_use':kept}
