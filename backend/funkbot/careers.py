@@ -271,7 +271,8 @@ def preview_attach(c, bot_id, preset_id):
     return {'bot_id': bot_id, 'name': bot['name'], 'title': bot['title'], 'preset_id': preset['id'], 'preset_title': preset['title'],
             'adds': {'level': preset['level'], 'department': preset['department'], 'model_tier': preset['model_tier']},
             'keeps': KEEPS,
-            'note': 'The career is recorded beside the Bot. Its name, job title, personality, memory, skills and sprite are not changed, and no permission or spending limit changes.'}
+            'note': ('The career is recorded beside the Bot. Its name, job title, personality, memory, skills and sprite are not changed, and no permission or spending limit changes. '
+                     'The role tier can only send the Bot to an equal or cheaper priced model than it uses now, never a dearer one, and only when you do not pick a model yourself.')}
 
 
 def attach_career(c, bot_id, preset_id, now=None):
